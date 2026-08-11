@@ -1,0 +1,13 @@
+# 密钥（禁止提交）
+.env
+
+# 截图
+screenshots/
+action_logs/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/

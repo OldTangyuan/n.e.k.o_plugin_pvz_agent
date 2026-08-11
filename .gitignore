@@ -216,3 +216,21 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# ========== PVZ Agent 插件特有 ==========
+
+# 密钥与环境（禁止提交）
+.env
+*.env
+!.env.example
+
+# 本地 Claude Code 配置（含本机路径，不共享）
+.claude/
+
+# 运行截图与动作日志
+screenshots/
+action_logs/
+
+# 编译缓存
+__pycache__/
+*.pyc

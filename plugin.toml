@@ -1,0 +1,80 @@
+[plugin]
+id = "pvz_agent"
+name = "PVZ Agent"
+description = "让猫娘自己玩《植物大战僵尸》"
+version = "0.2.0"
+entry = "plugin.plugins.pvz_agent:PVZAgentPlugin"
+
+[plugin.author]
+name = "N.E.K.O Team"
+
+[plugin.sdk]
+recommended = ">=0.1.0,<0.2.0"
+supported = ">=0.1.0,<0.3.0"
+
+[plugin_runtime]
+enabled = true
+auto_start = false
+
+# 插件级行为配置。AI 决策密钥/模型仍在 pvz/.env（猫娘自主决策用，单来源）；
+# 布局坐标与 OpenCV 阈值仍在 pvz/config.json（calibrate 校准工具读写，保持联动）。
+# 这里的开关只控制插件自身行为。
+[pvz_agent]
+# 插件启动时是否自动开始游玩（猫娘实时操作；需游戏已打开 + pvz/.env 已配置）。
+auto_start = false
+
+# 找游戏窗口的标题关键词（cmd/资源管理器/终端等已被核心自动排除）。
+window_title_keywords = [
+  "plant vs zombie", "植物大战僵尸", "pvz", "杂交版",
+  "plants vs. zombies", "plants vs zombies",
+]
+
+# ── 猫娘观察通道（周期推送纯截图，猫娘是玩家）──
+# 被动 feed：周期把最新游戏**纯截图**推进主模型视野（ai_behavior="read"，不打断，只更新上下文）。
+screenshot_feed_enabled = true
+# 被动 feed 最小间隔（秒）。画面没变化时不会重复推。
+screenshot_feed_interval = 8.0
+# 主动 nudge：游玩中时，周期性推截图+短触发文本给主模型（ai_behavior="respond"），
+# 唤起猫娘看画面并继续行动。触发文本只负责让模型起回合，不是游戏信息。
+screenshot_nudge_enabled = true
+# 主动 nudge 最小间隔（秒）。太短会让猫娘频繁开口，太长则反应迟钝。
+screenshot_nudge_interval = 5.0
+# nudge 的短触发文本（设空则只推图；注意纯图不会让模型起回合，离线会话下将不再被主动唤起）。
+# {MASTER_NAME} 会被替换为对用户的称呼；引导猫娘直接决策、不反问用户。
+screenshot_nudge_text = "【PVZ】最新战况。直接说出你接下来的操作并继续打，不要询问 {MASTER_NAME} 该怎么办。"
+# 给主模型的截图：原图优先（0 = 不缩放）+ 高质量 JPEG；超字节预算才自动降质。
+# 与后台执行核心用的降采样帧是两套，辅助扫描文本绝不发给主模型。
+screenshot_max_edge_px = 0
+# 推送 JPEG 压缩质量（1~95）。
+screenshot_jpeg_quality = 95
+# 单帧 JPEG 字节预算（超限才降质；message_plane 单条 payload 上限默认 256KB）。
+screenshot_max_bytes = 163840
+
+# ── 游玩行为开关 ──
+# 后台是否用 OpenCV 自动收集阳光（猫娘无需操心）。
+sun_auto_collect = true
+# 是否启用网格扫描（植物/僵尸坐标辅助决策）。
+scan_grid_enabled = true
+# 是否启用卡片扫描（可用/不可用卡片辅助决策）。
+scan_cards_enabled = true
+
+# ── 通知主模型的事件 ──
+# 游戏内判定本关结束时（terminate）推送通报。
+notify_on_terminate = true
+# 游戏窗口丢失/不可用时推送通报（并自动停止循环）。
+notify_window_lost = true
+
+[plugin.ui]
+enabled = true
+
+# 插件面板「快速开始」教程（hosted-tsx surface，前端运行时编译）。
+[[plugin.ui.guide]]
+id = "quickstart"
+title = "快速开始"
+entry = "surfaces/quickstart.tsx"
+# 指向 @ui.context(id="quickstart") provider；缺了 host 的 get_ui_context 会报
+# "UI context not found"，api.call 拿不到 action 列表必败。
+context = "quickstart"
+# action:call 授权 surface 通过 props.api.call 调插件 entry（pvz_get_status /
+# pvz_start / pvz_pause / pvz_stop，均需 @ui.action 暴露）。
+permissions = ["state:read", "action:call"]

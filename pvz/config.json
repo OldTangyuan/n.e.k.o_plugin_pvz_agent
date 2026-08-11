@@ -1,0 +1,125 @@
+{
+  "window_title_keywords": [
+    "plant vs zombie",
+    "植物大战僵尸",
+    "pvz",
+    "杂交版",
+    "plants vs. zombies",
+    "plants vs zombies"
+  ],
+  "layout": {
+    "canvas_w": 800,
+    "canvas_h": 600,
+    "rows": 5,
+    "cols": 9,
+    "col_width": 80,
+    "grid_top": 120,
+    "grid_row_h": 100,
+    "card_left": 119.3,
+    "card_step": 58.0,
+    "card_top": 46.3,
+    "shovel_pos": [
+      642,
+      38
+    ],
+    "select_area": {
+      "start_x": 0.4,
+      "start_y": 0.3,
+      "end_x": 0.95,
+      "end_y": 0.7,
+      "slots": 10
+    }
+  },
+  "agent": {
+    "tick_interval": 1.0,
+    "max_history_rounds": 1,
+    "include_image": true,
+    "narrator_on": false,
+    "screenshot_dir": "screenshots",
+    "jpeg_quality": 70,
+    "image_format": "jpeg"
+  },
+  "sun": {
+    "enabled": true,
+    "thread_enabled": true,
+    "scan_interval": 0.35,
+    "min_radius": 9.0,
+    "max_radius": 42.0,
+    "min_circularity": 0.4,
+    "max_click_per_scan": 8,
+    "click_gap": 0.2,
+    "s_min": 25,
+    "s_max": 170,
+    "v_min": 200,
+    "debug": false
+  },
+
+  "grid_scan": {
+    "enabled": true,
+    "sample_radius": 20,
+    "lawn_h_min": 40,
+    "lawn_h_max": 75,
+    "lawn_s_min": 150,
+    "lawn_v_min": 120,
+    "lawn_min_ratio": 0.85,
+    "lawn_contain_max": 0.60,
+    "warm_plant_min": 0.15,
+    "ice_plant_min": 0.11,
+    "zombie_blue_h_lo": 90,
+    "zombie_blue_h_hi": 130,
+    "zombie_blue_s_min": 60,
+    "zombie_blue_v_max": 180,
+    "zombie_blue_min": 0.03,
+    "zombie_dark_min": 0.15,
+    "zombie_dark_blue_min": 0.01,
+    "zombie_cross_min": 0.02,
+    "occlusion_check": true,
+    "occlusion_region": [160, 150, 640, 480],
+    "occlusion_lawn_max": 0.75,
+    "debug": false
+  },
+  "card_scan": {
+    "enabled": true,
+    "bar_top": 3,
+    "bar_bottom": 78,
+    "max_cards": 9,
+    "card_bright_min": 45,
+    "card_sat_min": 45,
+    "card_col_ratio": 0.18,
+    "card_w_est": 50,
+    "card_w_min": 30,
+    "card_w_max": 70,
+    "card_h_min": 50,
+    "card_h_max": 80,
+    "avail_bright_min": 115.0,
+    "cost_bright_min": 120.0,
+    "unavail_bright_max": 100.0,
+    "colorful_min": 0.20,
+    "min_gap_width": 5,
+    "wood_r_min": 70,
+    "wood_r_max": 140,
+    "wood_g_max": 70,
+    "wood_b_max": 40,
+    "debug": false
+  },
+  "select_scan": {
+    "enabled": true,
+    "wall_top": 120,
+    "wall_bottom": 480,
+    "bright_min": 70,
+    "sat_min": 40,
+    "btn_top": 500,
+    "btn_bottom": 600,
+    "btn_bright_min": 100,
+    "debug": false
+  },
+  "vlm": {
+    "max_output_tokens": 512,
+    "temperature": 0.3,
+    "retries": 2,
+    "retry_delay": 1.0,
+    "timeout": 120.0,
+    "thinking": "disabled"
+  },
+  "save_capture": false
+}
