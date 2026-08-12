@@ -31,6 +31,7 @@ class VLMConfig:
     retry_delay: float = 1.0
     timeout: float = 120.0
     thinking: str = ""                   # 推理控制：""(默认)/"disabled"(关闭思维链，加快响应)
+    tool_choice: str = "required"        # 原生工具选择策略："auto"(可不用工具)/"required"(强制每轮调用)/"none"
 
 
 @dataclass
@@ -271,6 +272,7 @@ def load_config() -> AppConfig:
         retry_delay=jcfg.get("vlm", {}).get("retry_delay", 2.0),
         timeout=jcfg.get("vlm", {}).get("timeout", 300.0),
         thinking=jcfg.get("vlm", {}).get("thinking", ""),
+        tool_choice=jcfg.get("vlm", {}).get("tool_choice", "required"),
     )
 
     # ---- 布局（config.json）----

@@ -104,6 +104,15 @@ def test_configure_toggles() -> None:
     assert svc._notify_window_lost is False
 
 
+def test_configure_card_position_mode() -> None:
+    svc = _make_service()
+    assert svc._card_position_mode == "opencv"  # 默认
+    svc.configure({"card_position_mode": "fixed"})
+    assert svc._card_position_mode == "fixed"
+    svc.configure({"card_position_mode": "invalid"})  # 非法值回退默认
+    assert svc._card_position_mode == "opencv"
+
+
 def test_set_goal() -> None:
     svc = _make_service()
     assert svc.set_goal("这关用寒冰射手").get("status") == "ok"
@@ -488,6 +497,51 @@ def test_build_planner_tools_schema() -> None:
     assert {"row", "col", "card_index"} <= set(pp["parameters"]["properties"])
 
 
+def test_planner_system_prompts_require_tool_call() -> None:
+    """原生与 legacy 两套 system prompt 都必须强制每轮调用工具，避免模型只回文本不行动。"""
+    from pvz_agent.config import AppConfig
+    from pvz_agent.prompts import (
+        build_planner_system,
+        build_planner_system_xml,
+        build_planner_user_footer,
+    )
+
+    cfg = AppConfig()
+    assert "每轮必须调用至少一个工具" in build_planner_system(cfg)
+    assert "每轮必须输出至少一个" in build_planner_system_xml(cfg)
+    assert "每轮必须调用工具" in build_planner_user_footer(goal="自动赢", elapsed=1.0, last_summary="")
+
+
+def test_vlm_tool_choice_required_and_fallback() -> None:
+    """默认强制工具调用；provider 不支持 'required' 时降级 'auto' 重试一次。"""
+    from pvz_agent.config import VLMConfig
+    from pvz_agent.vlm import VLMClient
+
+    class _Msg:
+        tool_calls = []
+        content = ""
+
+    class _Resp:
+        usage = None
+        choices = [type("_Ch", (), {"message": _Msg()})()]
+
+    client = VLMClient.__new__(VLMClient)
+    client.cfg = VLMConfig(tool_choice="required")
+    client._client = mock.Mock()
+    sent: list[str] = []
+
+    def fake_create(**kw):
+        sent.append(kw.get("tool_choice"))
+        if len(sent) == 1:
+            raise RuntimeError("tool_choice 'required' unsupported")
+        return _Resp()
+
+    client._client.chat.completions.create.side_effect = fake_create
+    calls, _content = client.chat_with_tools("img", [{"role": "system", "content": "s"}], "u", [], mime="image/jpeg")
+    assert sent == ["required", "auto"]  # 首次 required 失败 → 降级 auto 重试
+    assert (calls or []) == []  # 无工具调用时返回 None/[]
+
+
 def test_render_tool_calls() -> None:
     text = _render_tool_calls([{"name": "place_plant", "arguments": {"card_index": 0, "row": 1, "col": 2}}])
     assert "place_plant" in text and "card_index=0" in text
@@ -554,6 +608,34 @@ def test_executor_native_dispatch_place_plant() -> None:
     result = ex._native_dispatch("place_plant", {"card_index": 0, "row": 1, "col": 2})
     assert result["status"] == "ok"
     assert result["row"] == 1 and result["col"] == 2
+
+
+def test_executor_card_position_mode_fixed_skips_scanner() -> None:
+    """fixed 模式：即使注入了 OpenCV 卡片扫描器也不使用，直接按固定坐标种。"""
+    ex = Executor(mock.Mock(), LayoutConfig(), mouse_lock=mock.Mock(), card_position_mode="fixed")
+    ex._to_screen = mock.Mock(return_value=(5, 5))
+    ex._click_screen = mock.Mock()
+    ex._card_scanner = mock.Mock()
+    result = ex.place_plant(0, 1, 2)
+    assert result["status"] == "ok"
+    ex._card_scanner.scan.assert_not_called()
+
+
+def test_executor_card_position_mode_opencv_uses_scanner() -> None:
+    """opencv 模式：用卡片扫描器实时识别卡片位置。"""
+    win = mock.Mock()
+    win.client_rect = (0, 0, 800, 600)
+    ex = Executor(win, LayoutConfig(), mouse_lock=mock.Mock(), card_position_mode="opencv")
+    ex._to_screen = mock.Mock(return_value=(5, 5))
+    ex._click_screen = mock.Mock()
+    ex._card_scanner = mock.Mock()
+    res = mock.Mock()
+    res.card_positions = {0: (120, 50)}
+    ex._card_scanner.scan.return_value = res
+    with mock.patch("PIL.ImageGrab.grab", return_value=mock.Mock()):
+        result = ex.place_plant(0, 1, 2)
+    assert result["status"] == "ok"
+    ex._card_scanner.scan.assert_called_once()
 
 
 def test_fail_key_native_name() -> None:

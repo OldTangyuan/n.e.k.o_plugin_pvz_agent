@@ -43,10 +43,14 @@ class Executor:
         win: WindowHandle,
         layout: LayoutConfig,
         mouse_lock: threading.Lock | None = None,
+        card_position_mode: str = "opencv",
     ) -> None:
         self.win = win
         self.layout = layout
         self.mouse_lock = mouse_lock or threading.Lock()
+        # 种植植物时定位卡片的策略："opencv"=OpenCV 实时识别（失败回退固定坐标）；
+        # "fixed"=直接用 config.json 预定的固定坐标（card_left/card_step/card_top）。
+        self.card_position_mode = card_position_mode
         self._card_scanner = None  # 由 main 注入 CardScanner，place_plant 前扫描卡片位置
         self._select_scanner = None  # 由 main 注入 SelectScanner，select_seeds 扫描选卡界面
 
@@ -202,9 +206,9 @@ class Executor:
                 "error": f"row/col 越界: 行{row}列{col}（合法 行0~{self.layout.rows-1} 列0~{self.layout.cols-1}）",
             }
         try:
-            # 1. 优先用 OpenCV 扫描到的卡片实际位置
-            card_pos = None
-            if self._card_scanner is not None:
+            # 1. 按模式定位卡片："opencv"=实时扫描（失败回退固定坐标）；"fixed"=直接用预定坐标
+            card_x = card_y = None
+            if self.card_position_mode == "opencv" and self._card_scanner is not None:
                 try:
                     import numpy as np
                     from PIL import Image, ImageGrab
@@ -212,13 +216,13 @@ class Executor:
                     if right - left > 0 and bottom - top > 0:
                         shot = ImageGrab.grab((left, top, right, bottom))
                         res = self._card_scanner.scan(shot)
-                        card_pos = res.card_positions.get(card_index)
+                        pos = res.card_positions.get(card_index)
+                        if pos is not None:
+                            card_x, card_y = pos
                 except Exception:
-                    card_pos = None  # 扫描失败回退固定坐标
+                    card_x = card_y = None  # 扫描失败回退固定坐标
 
-            if card_pos is not None:
-                card_x, card_y = card_pos
-            else:
+            if card_x is None:
                 card_x, card_y = self.card_center(card_index)
             cx, cy = self._to_screen(card_x, card_y)
             self._click_screen(cx, cy)

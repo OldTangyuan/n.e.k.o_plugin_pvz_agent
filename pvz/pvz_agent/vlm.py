@@ -137,6 +137,13 @@ class VLMClient:
         """
         messages = self._build_messages(img_b64, history, user_text, True, mime)
 
+        # 工具选择策略：默认强制每轮调用工具（required），避免模型只回文本不行动。
+        # 个别 provider 不支持 "required"，调用失败时降级 "auto" 重试。
+        tool_choice = (self.cfg.tool_choice or "").strip()
+        if tool_choice not in ("auto", "required", "none"):
+            tool_choice = "required"
+        used_choice = tool_choice
+
         last_exc: Exception | None = None
         for attempt in range(1, self.cfg.retries + 1):
             try:
@@ -146,7 +153,7 @@ class VLMClient:
                     max_tokens=self.cfg.max_output_tokens,
                     temperature=self.cfg.temperature,
                     tools=tools,
-                    tool_choice="auto",
+                    tool_choice=used_choice,
                     **self._request_kwargs(),
                 )
                 usage = getattr(resp, "usage", None)
@@ -165,6 +172,11 @@ class VLMClient:
 
             except Exception as exc:
                 last_exc = exc
+                if used_choice == "required":
+                    # provider 不支持 "required" → 降级 "auto" 立即重试（不等待退避）
+                    used_choice = "auto"
+                    print("[VLM] tool_choice='required' 不被当前 provider 支持，已降级 'auto' 重试")
+                    continue
                 if attempt < self.cfg.retries:
                     delay = self.cfg.retry_delay * (2 ** (attempt - 1))
                     print(f"[VLM] 第 {attempt} 次请求失败: {exc}，{delay:.0f} 秒后重试...")

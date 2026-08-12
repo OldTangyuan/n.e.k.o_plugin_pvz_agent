@@ -142,6 +142,7 @@ class PvZAgentService:
         self._sun_auto_collect = True
         self._scan_grid_enabled = True
         self._scan_cards_enabled = True
+        self._card_position_mode = "opencv"  # 种植时定位卡片："opencv"=实时识别 / "fixed"=固定坐标
 
         # 观察通道（主模型观察：周期截图，原图高质量优先）
         self._feed_enabled = True
@@ -197,6 +198,8 @@ class PvZAgentService:
             self._sun_auto_collect = bool(plugin_cfg.get("sun_auto_collect", True))
             self._scan_grid_enabled = bool(plugin_cfg.get("scan_grid_enabled", True))
             self._scan_cards_enabled = bool(plugin_cfg.get("scan_cards_enabled", True))
+            _mode = str(plugin_cfg.get("card_position_mode", "opencv") or "opencv").strip().lower()
+            self._card_position_mode = _mode if _mode in ("opencv", "fixed") else "opencv"
             self._feed_enabled = bool(plugin_cfg.get("screenshot_feed_enabled", True))
             self._feed_interval = float(plugin_cfg.get("screenshot_feed_interval", 8.0) or 8.0)
             self._nudge_enabled = bool(plugin_cfg.get("screenshot_nudge_enabled", True))
@@ -298,7 +301,10 @@ class PvZAgentService:
                 "如需植物/僵尸/卡片扫描，请 `uv sync --group galgame` 后重启插件。", exc,
             )
 
-        self._executor = core.executor.Executor(win, cfg.layout, mouse_lock=self._mouse_lock)
+        self._executor = core.executor.Executor(
+            win, cfg.layout, mouse_lock=self._mouse_lock,
+            card_position_mode=self._card_position_mode,
+        )
         if has_cv2:
             self._sun_collector = sun.SunCollector(win, cfg.layout, cfg.sun, mouse_lock=self._mouse_lock)
             if cfg.grid_scan.enabled:
@@ -567,7 +573,7 @@ class PvZAgentService:
     def inject_instruction(self, instruction: str) -> dict[str, Any]:
         """注入一条自然语言打法引导，下轮 tick 时交给后台执行核心（持久进历史）。
 
-        例如"先种豌豆射手"、"这波优先攒阳光"——猫娘用自然语言调整打法，
+        例如"先种豌豆射手"、"寒冰射手守第二行"——猫娘用自然语言调整打法，
         不提供精确坐标/步骤，具体执行由执行核心完成。
         """
         if not instruction or not instruction.strip():

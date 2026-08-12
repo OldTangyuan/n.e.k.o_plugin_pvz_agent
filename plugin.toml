@@ -40,8 +40,9 @@ screenshot_nudge_enabled = true
 # 主动 nudge 最小间隔（秒）。太短会让猫娘频繁开口，太长则反应迟钝。
 screenshot_nudge_interval = 5.0
 # nudge 的短触发文本（设空则只推图；注意纯图不会让模型起回合，离线会话下将不再被主动唤起）。
-# {MASTER_NAME} 会被替换为对用户的称呼；引导猫娘直接决策、不反问用户。
-screenshot_nudge_text = "【PVZ】最新战况。直接说出你接下来的操作并继续打，不要询问 {MASTER_NAME} 该怎么办。"
+# {MASTER_NAME} 会被替换为对用户的称呼；引导猫娘：阳光自动收集不用管、先分析局势再给
+# 针对性打法、不重复旧指令、用工具调整打法、不反问用户。
+screenshot_nudge_text = "【PVZ】最新战况。阳光会自动收集，不用管。先分析局势，再给一句针对性的打法，别重复旧指令；要调整就用 pvz_instruction / pvz_goal，别问 {MASTER_NAME}。"
 # 给主模型的截图：原图优先（0 = 不缩放）+ 高质量 JPEG；超字节预算才自动降质。
 # 与后台执行核心用的降采样帧是两套，辅助扫描文本绝不发给主模型。
 screenshot_max_edge_px = 0
@@ -57,6 +58,10 @@ sun_auto_collect = true
 scan_grid_enabled = true
 # 是否启用卡片扫描（可用/不可用卡片辅助决策）。
 scan_cards_enabled = true
+# 种植植物时定位卡片的方式：
+# "opencv" = OpenCV 实时识别卡片位置（适配传送带/布局变化；识别失败会自动回退固定坐标）
+# "fixed"  = 直接用 config.json 预定的固定坐标（card_left/card_step/card_top；更稳定、省资源）
+card_position_mode = "fixed"
 
 # ── 通知主模型的事件 ──
 # 游戏内判定本关结束时（terminate）推送通报。

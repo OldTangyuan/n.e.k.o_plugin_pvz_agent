@@ -151,6 +151,8 @@ place_plant / shovel / click_card / select_seeds / left_click / key / wait / ter
 直接调用工具，不要输出 <tool_call> 或任何文本格式的工具调用。
 
 ## 规则（简短）
+0. **每轮必须调用至少一个工具**：直接调用上面的工具；严禁只返回文本/思考而不调用工具。
+   暂时没有可种/可铲/可点的就调用 wait 等待，需要结束才 terminate，需要向用户开口才 answer。
 1. 战斗内优先用 place_plant 种植物；非战斗 UI 用 left_click。阳光够就种，不够就 wait。
 2. 改变状态后可以 wait(1~2)。单轮可连续调用多个工具（执行多个种植动作时不要种同一个卡片的植物）。
 3. 连续失败 2 次换目标，别重复点同一位置。
@@ -211,6 +213,8 @@ def build_planner_system_xml(cfg: AppConfig) -> str:
 - computer_use: left_click(coordinate) 点UI | key(keys) 按键 | wait(time) 等待 | terminate(status) 结束任务 | answer(text) 向用户说话
 
 ## 规则（简短）
+0. **每轮必须输出至少一个 <tool_call>**：先写简短 <plan> 再紧跟 <tool_call>；严禁只输出 <plan>
+   或普通文本而无 <tool_call>；暂时无事可做就 wait，需要结束才 terminate，需要开口才 answer。
 1. 战斗内用 pvz_action；非战斗 UI 用 left_click。阳光够就种，不够就 wait。
 2. 改变状态后可以 wait(1~2)。单轮可连续输出多个动作（执行多个种植动作时不要种同一个卡片的植物）。
 3. 连续失败 2 次换目标，别重复点同一位置。
@@ -263,7 +267,7 @@ def build_planner_user_footer(
         parts.append(f"【提示】{note}")
     if last_summary:
         parts.append(f"【上轮】{last_summary}")
-    parts.append("输出动作：")
+    parts.append("输出动作（每轮必须调用工具）：")
     return "\n".join(parts)
 
 
