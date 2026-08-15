@@ -1,12 +1,12 @@
-import win32gui
-import win32con
-import win32api
 import ctypes
-from PIL import ImageGrab
-import pyautogui
 import os
-import time
 import re
+import time
+
+import pyautogui
+import win32con
+import win32gui
+from PIL import ImageGrab
 
 # ---------- 配置 ----------
 NORM_WIDTH = 800    # 虚拟画布宽度（用于 vm 命令）
@@ -15,7 +15,7 @@ NORM_HEIGHT = 600   # 虚拟画布高度
 # ---------- DPI 感知 ----------
 try:
     ctypes.windll.shcore.SetProcessDpiAwareness(1)
-except:
+except (AttributeError, OSError):
     pass
 
 # ---------- 窗口匹配规则 ----------
@@ -64,7 +64,7 @@ def get_client_origin(hwnd):
     """返回客户区左上角屏幕坐标 (left, top) 及客户区宽高 (width, height)"""
     rect = win32gui.GetClientRect(hwnd)
     left_top = win32gui.ClientToScreen(hwnd, (rect[0], rect[1]))
-    right_bottom = win32gui.ClientToScreen(hwnd, (rect[2], rect[3]))
+    # right_bottom = win32gui.ClientToScreen(hwnd, (rect[2], rect[3]))
     return left_top[0], left_top[1], rect[2], rect[3]
 
 def activate_window(hwnd):

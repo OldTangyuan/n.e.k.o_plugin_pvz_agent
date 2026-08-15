@@ -41,7 +41,7 @@ import sys
 import time
 
 import pyautogui
-from PIL import Image, ImageDraw
+from PIL import ImageDraw
 
 from .config import CONFIG_FILE, load_config
 from .executor import Executor
@@ -65,8 +65,10 @@ def _linear_fit(xs: list[float], ys: list[float]) -> tuple[float, float]:
     n = len(xs)
     if n < 2:
         return 1.0, 0.0
-    sx = sum(xs); sy = sum(ys)
-    sxx = sum(x * x for x in xs); sxy = sum(x * y for x, y in zip(xs, ys))
+    sx = sum(xs)
+    sy = sum(ys)
+    sxx = sum(x * x for x in xs)
+    sxy = sum(x * y for x, y in zip(xs, ys))
     denom = n * sxx - sx * sx
     if abs(denom) < 1e-9:
         return 1.0, 0.0
@@ -108,8 +110,8 @@ def _show_grid_preview(ex: Executor, cfg) -> None:
     path = os.path.join("debug", f"grid_preview_{time.strftime('%Y%m%d_%H%M%S')}.png")
     img.save(path)
     print(f"[预览] 已保存网格叠加图: {path}")
-    print(f"[预览] 红色十字 = 预测格子中心，绿线 = 每行中心连线。")
-    print(f"[预览] 请打开该图，对比红色十字是否落在真实格子的中心。")
+    print("[预览] 红色十字 = 预测格子中心，绿线 = 每行中心连线。")
+    print("[预览] 请打开该图，对比红色十字是否落在真实格子的中心。")
 
 
 def _move_to_cell(ex, cfg, row: int, col: int) -> None:
@@ -194,10 +196,10 @@ def _move_to_shovel(ex, cfg) -> None:
     left, top, _, _ = ex.win.client_rect
     ex.win.ensure_foreground()
     pyautogui.moveTo(ax, ay, duration=0.3)
-    print(f"  已移动鼠标到 铲子按钮 预测中心")
+    print("  已移动鼠标到 铲子按钮 预测中心")
     print(f"    屏幕绝对坐标: ({ax},{ay})")
     print(f"    窗口内相对坐标: ({ax-left},{ay-top})")
-    print(f"  若落点不在真实铲子中心 → 手动挪到真实中心，然后 shovel 采集")
+    print("  若落点不在真实铲子中心 → 手动挪到真实中心，然后 shovel 采集")
 
 
 def _fit_cards(ex, cfg, card_real: list) -> None:
@@ -341,7 +343,7 @@ def main() -> None:
             mx, my = pyautogui.position()
             left, top, _, _ = ex.win.client_rect
             shovel_real.append((mx, my))
-            print(f"  已采集 铲子按钮")
+            print("  已采集 铲子按钮")
             print(f"    屏幕绝对: ({mx},{my})  窗口内相对: ({mx-left},{my-top})")
         elif cmd == "fit":
             if mode in ("grid", "all"):

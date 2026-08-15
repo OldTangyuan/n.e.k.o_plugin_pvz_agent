@@ -86,7 +86,7 @@ def main() -> None:
         print("          请回到战斗界面后重试，或用 --no-occlusion 强制扫描。")
         return
 
-    print(f"\n检测结果:")
+    print("\n检测结果:")
     print(f"  植物 ({len(result.plants)}): {[(r, c) for r, c in result.plants]}")
     print(f"  僵尸行: {result.zombie_rows}")
 
@@ -103,7 +103,7 @@ def main() -> None:
         for r, row in enumerate(grid):
             print(f"  r{r}  " + "  ".join(row))
 
-    print(f"\n标注图已保存到 debug/gridscan_*.png（绿圈=植物，红横条=僵尸行）")
+    print("\n标注图已保存到 debug/gridscan_*.png（绿圈=植物，红横条=僵尸行）")
     print("打开标注图核对：绿圈应罩住植物，红横条应盖住有僵尸的行。")
     print("僵尸漏检：调低 --rowpants；空格误判植物：调高 --warm。")
 

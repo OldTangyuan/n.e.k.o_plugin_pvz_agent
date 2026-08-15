@@ -217,15 +217,6 @@ class PvZAgentService:
 
             # 核心包的 __init__ 只 re-export config，不会自动导入其它子模块。
             # 这里显式导入无 cv2 依赖的子模块，使其成为包属性（core.window 等）。
-            from pvz_agent import (  # noqa: PLC0415, F401
-                config,
-                executor,
-                parser,
-                planner,
-                prompts,
-                vlm,
-                window,
-            )
             self._core = pvz_agent
         return self._core
 
@@ -339,7 +330,6 @@ class PvZAgentService:
         """启动自检：cv2 依赖 → 找窗口 → 截图。不抛异常，返回可读结果。"""
         result: dict[str, Any] = {"cv2": False, "window": False, "screenshot": False}
         try:
-            import cv2  # noqa: PLC0415, F401  # 核心的 sun/grid_scan 模块级依赖
             result["cv2"] = True
         except Exception:
             result["message"] = (

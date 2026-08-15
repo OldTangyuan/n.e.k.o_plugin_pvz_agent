@@ -12,11 +12,6 @@ import unittest.mock as mock
 from contextlib import contextmanager
 
 from PIL import Image
-
-from plugin.sdk.plugin.llm_tool import collect_llm_tool_methods
-from plugin.sdk.plugin.ui import UI_ACTION_META_ATTR, UI_CONTEXT_META_ATTR
-from plugin.sdk.shared.constants import EVENT_META_ATTR
-
 from plugin.plugins.pvz_agent import PVZAgentPlugin
 from plugin.plugins.pvz_agent import service as service_module
 from plugin.plugins.pvz_agent.neko_interface import PvZNekoInterface, _normalize
@@ -25,6 +20,9 @@ from plugin.plugins.pvz_agent.service import (
     PvZAgentService,
     _build_feedback,
 )
+from plugin.sdk.plugin.llm_tool import collect_llm_tool_methods
+from plugin.sdk.plugin.ui import UI_ACTION_META_ATTR, UI_CONTEXT_META_ATTR
+from plugin.sdk.shared.constants import EVENT_META_ATTR
 
 # pvz 核心（service 模块已在 import 时把 pvz/ 加入 sys.path）
 from pvz_agent.executor import Executor, LayoutConfig

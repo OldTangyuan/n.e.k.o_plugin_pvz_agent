@@ -219,8 +219,8 @@ class GridScanner:
             H, S, V = hsv[:, 0], hsv[:, 1], hsv[:, 2]
             # 用主体分位（排除边缘/抗锯齿的极端像素）
             h_lo, h_hi = np.percentile(H, 5), np.percentile(H, 95)
-            s_lo, s_hi = np.percentile(S, 5), np.percentile(S, 95)
-            v_lo, v_hi = np.percentile(V, 5), np.percentile(V, 95)
+            s_lo, _ = np.percentile(S, 5), np.percentile(S, 95)
+            v_lo, _ = np.percentile(V, 5), np.percentile(V, 95)
             # 外扩少量容差（夜晚光照波动）
             h_min = max(0, int(h_lo) - 8)
             h_max = min(179, int(h_hi) + 8)

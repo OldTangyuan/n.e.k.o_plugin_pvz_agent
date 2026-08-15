@@ -210,8 +210,7 @@ class Executor:
             card_x = card_y = None
             if self.card_position_mode == "opencv" and self._card_scanner is not None:
                 try:
-                    import numpy as np
-                    from PIL import Image, ImageGrab
+                    from PIL import ImageGrab
                     left, top, right, bottom = self.win.client_rect
                     if right - left > 0 and bottom - top > 0:
                         shot = ImageGrab.grab((left, top, right, bottom))
@@ -282,7 +281,6 @@ class Executor:
                         "error": "未配置选卡扫描器（select_scan.enabled=false）"}
 
             # 1. 截图并扫描选卡界面
-            import numpy as np
             from PIL import ImageGrab
             left, top, right, bottom = self.win.client_rect
             if right - left <= 0 or bottom - top <= 0:

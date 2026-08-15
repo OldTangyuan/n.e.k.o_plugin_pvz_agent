@@ -31,7 +31,7 @@ import pyautogui
 from PIL import Image
 
 from .config import LayoutConfig, SunConfig
-from .window import WindowHandle, Capturer
+from .window import Capturer, WindowHandle
 
 pyautogui.FAILSAFE = True
 

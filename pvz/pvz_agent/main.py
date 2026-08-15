@@ -10,9 +10,8 @@ import sys
 import threading
 import time
 
-from .config import load_config
 from .card_scan import CardScanner
-from .select_scan import SelectScanner
+from .config import load_config
 from .controller import Controller
 from .executor import Executor
 from .grid_scan import GridScanner
@@ -20,6 +19,7 @@ from .narrator import Narrator
 from .parser import ToolCall
 from .planner import Planner
 from .prompts import build_planner_system, build_planner_system_xml, build_planner_user_footer, translate_action
+from .select_scan import SelectScanner
 from .sun import SunCollector
 from .vlm import VLMClient
 from .window import Capturer, find_target_windows, pick_single
