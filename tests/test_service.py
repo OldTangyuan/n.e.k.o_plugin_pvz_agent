@@ -7,6 +7,19 @@ neko_interface 参数整形、facade 的 llm_tool / plugin_entry 注册面。
 
 from __future__ import annotations
 
+import sys
+
+import pytest
+
+# PvZ 插件的运行时强依赖 Windows（pywin32 窗口枚举 + Windows 版 vendored OpenCV）。
+# CI 跑在 ubuntu：收集本模块时 import pvz_agent.executor → window → win32api 必失败。
+# 本机 Windows 下完整运行本套件；CI 只跑 test_smoke.py 校验仓库结构。
+if sys.platform != "win32":
+    pytest.skip(
+        "PvZ Agent 插件测试依赖 Windows 运行时（pywin32 + Windows 版 vendored OpenCV）",
+        allow_module_level=True,
+    )
+
 import asyncio
 import unittest.mock as mock
 from contextlib import contextmanager

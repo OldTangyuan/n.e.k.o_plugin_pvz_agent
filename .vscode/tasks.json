@@ -1,0 +1,41 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "N.E.K.O: check pvz_agent",
+      "type": "shell",
+      "command": "uv run python -m plugin.neko_plugin_cli.cli check pvz_agent",
+      "options": {
+        "cwd": "${config:nekoPlugin.repoRoot}"
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "N.E.K.O: sync pvz_agent",
+      "type": "shell",
+      "command": "uv run --with pip python -m plugin.neko_plugin_cli.cli sync pvz_agent --clean",
+      "options": {
+        "cwd": "${config:nekoPlugin.repoRoot}"
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "N.E.K.O: check -r pvz_agent",
+      "type": "shell",
+      "command": "uv run python -m plugin.neko_plugin_cli.cli check -r pvz_agent",
+      "options": {
+        "cwd": "${config:nekoPlugin.repoRoot}"
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "N.E.K.O: build pvz_agent",
+      "type": "shell",
+      "command": "uv run python -m plugin.neko_plugin_cli.cli build pvz_agent",
+      "options": {
+        "cwd": "${config:nekoPlugin.repoRoot}"
+      },
+      "problemMatcher": []
+    }
+  ]
+}
