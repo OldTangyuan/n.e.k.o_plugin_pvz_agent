@@ -479,8 +479,9 @@ class PvZAgentService:
         else:
             result["cv2"] = False
             try:
-                import cv2  # noqa: PLC0415, F401  # 核心的 sun/grid_scan 模块级依赖
+                import cv2  # noqa: PLC0415  # 核心的 sun/grid_scan 模块级依赖
                 result["cv2"] = True
+                result["cv2_version"] = str(getattr(cv2, "__version__", ""))
             except Exception:
                 result["message"] = (
                     "缺少 opencv(cv2)。请执行 `uv sync --group galgame` 或 "
