@@ -53,7 +53,7 @@ def main() -> None:
     opts = _parse_args(sys.argv[1:])
 
     cfg = load_config()
-    handles = find_target_windows(cfg.window_title_keywords)
+    handles = find_target_windows(cfg.window_titles)
     win = pick_single(handles)
     cap = Capturer(win)
 

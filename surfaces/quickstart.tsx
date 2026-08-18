@@ -153,14 +153,19 @@ export default function PvZAgentQuickstart(props: PluginSurfaceProps) {
       <Card title="怎么开始">
         <Steps>
           <Step index="1" title="打开游戏">
-            启动《植物大战僵尸》（原版 / 杂交版均可），游戏窗口标题需含
-            “植物大战僵尸 / pvz / 杂交版”（可在插件配置里改 window_title_keywords）。
+            启动《植物大战僵尸》**原版**（当前推荐；纯文本内存方案支持原版等受支持版本，
+            **杂交版正在适配中**）。插件会按 window_titles 里的精确标题轮询查找游戏窗口；
+            标题不符时，把窗口的精确标题写进插件配置或 pvz/config.json 的 window_titles（保存即生效）。
           </Step>
           <Step index="2" title="配置 AI 决策">
-            在插件目录 pvz/.env 填入你的 AI 服务地址与密钥（复制 pvz/.env.example
-            为 pvz/.env 后填写）。不配置的话猫娘无法自主决策，游玩无法开始。
+            在插件目录 pvz/.env 填入 AI 服务地址与密钥（复制 pvz/.env.example 为 pvz/.env
+            后填写）。**纯文本模式填 TEXT_VLM_MODEL**（可只填这一个，URL/密钥复用 VLM_*）；
+            视觉模式填 VLM_MODEL。不配置的话猫娘无法自主决策，游玩无法开始。
           </Step>
-          <Step index="3" title="对猫娘说一句">
+          <Step index="3" title="（纯文本模式）管理员运行">
+            读内存 + 代码注入需要**以管理员身份**运行宿主，否则会提示“内存连接失败”。
+          </Step>
+          <Step index="4" title="对猫娘说一句">
             在对话里说“去玩植物大战僵尸吧”，或直接点上面的「开始游玩」。
             之后猫娘会周期性看游戏画面，主动告诉你她接下来的操作，并自己打下去。
           </Step>
@@ -181,13 +186,18 @@ export default function PvZAgentQuickstart(props: PluginSurfaceProps) {
       <Card title="排障">
         <Steps>
           <Step index="1" title="状态一直显示“未找到窗口”">
-            确认游戏已打开、没最小化；窗口标题需匹配关键词，可在插件配置
-            window_title_keywords 里补充。
+            确认游戏已打开、没最小化；窗口标题需与 window_titles 里的**精确标题**一致
+            （可在插件配置或 pvz/config.json 的 window_titles 里补充，保存即生效）。
           </Step>
           <Step index="2" title="AI 决策未就绪">
-            说明还没配置 AI 决策：在 pvz/.env 填好并重启插件。
+            说明还没配置 AI 决策：纯文本模式在 pvz/.env 填 TEXT_VLM_MODEL，视觉模式填
+            VLM_MODEL，填好并重启插件。
           </Step>
-          <Step index="3" title="点「开始游玩」没反应">
+          <Step index="3" title="纯文本模式提示“内存连接失败”">
+            ① 需以**管理员身份**运行宿主；② 确认游戏是**受支持版本**（建议原版，
+            杂交版正在适配中）。
+          </Step>
+          <Step index="4" title="点「开始游玩」没反应">
             先确认插件已在运行（列表页启动），再确认游戏窗口与 AI 决策都已就绪。
           </Step>
         </Steps>
@@ -196,10 +206,12 @@ export default function PvZAgentQuickstart(props: PluginSurfaceProps) {
       <Card title="配置（plugin.toml [pvz_agent]）">
         <KeyValue
           items={[
+            { key: "mode", label: "运行模式", value: '"text"=纯文本内存(默认) / "vision"=视觉' },
+            { key: "tool_call_mode", label: "工具调用", value: '"fc"=原生函数调用 / "regex"=简化正则' },
             { key: "screenshot_feed_enabled", label: "被动推画面", value: "true（8 秒，画面变了才推）" },
             { key: "screenshot_nudge_enabled", label: "主动催猫娘行动", value: "true（5 秒）" },
             { key: "sun_auto_collect", label: "自动收阳光", value: "true" },
-            { key: "window_title_keywords", label: "窗口关键词", value: "植物大战僵尸 / pvz / 杂交版" },
+            { key: "window_titles", label: "窗口标题", value: "植物大战僵尸 / pvz / 杂交版" },
           ]}
         />
       </Card>
@@ -208,6 +220,15 @@ export default function PvZAgentQuickstart(props: PluginSurfaceProps) {
         猫娘的 AI 决策需要能联网调用 AI 服务（在 pvz/.env 配置）。没配置时面板会显示
         “AI 决策未就绪”，点「开始游玩」会提示错误。
       </Warning>
+
+      <Alert tone="info">
+        **纯文本模式已经可以用了**（mode="text"，当前默认）：不用视觉模型 / OpenCV，一切
+        状态与触发靠读游戏内存（pvz/vendor/pvz_memory）——精确拿到阳光/卡片/植物/僵尸血量/
+        波次，用**纯文本 LLM** 决策（默认开启思考模式、更多上下文），动作走代码注入执行；
+        但**仍照常把游戏截图推给猫娘**供她看画面指挥。
+        特点：LLM 思考期间不冻结游戏、窗口失焦也不暂停、非战斗界面不喂 LLM 只轮询等待。
+        注意：需以**管理员身份**运行宿主 + **受支持版本**（建议原版；**杂交版正在适配中**）。
+      </Alert>
     </Page>
   )
 }

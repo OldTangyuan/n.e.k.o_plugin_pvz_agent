@@ -261,7 +261,7 @@ def main() -> None:
     mode = sys.argv[1] if len(sys.argv) > 1 else "all"
 
     cfg = load_config()
-    handles = find_target_windows(cfg.window_title_keywords)
+    handles = find_target_windows(cfg.window_titles)
     win = pick_single(handles)
     ex = Executor(win, cfg.layout)
 

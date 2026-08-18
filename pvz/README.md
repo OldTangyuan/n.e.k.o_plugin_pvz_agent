@@ -1,6 +1,13 @@
 # PvZ 双 Agent 自动化
 
-给 `xzx.py` 配上双 Agent，使其能**自动完成《植物大战僵尸》关卡**（纯 VLM，不读内存）。
+给 `xzx.py` 配上双 Agent，使其能**自动完成《植物大战僵尸》关卡**。提供两种运行模式：
+
+- **纯文本内存方案（`mode="text"`，当前主推，已可用）**：读游戏进程内存获取精确状态，
+  用纯文本 LLM 决策（不喂图），动作走代码注入执行；
+- **视觉方案（`mode="vision"`）**：OpenCV 扫描截图 + VLM 看截图决策 + 鼠标执行（纯 VLM，不读内存）。
+
+> ⚠️ **杂交版正在适配中**：读内存 + 注入目前支持原版 1.0.0.1051 EN 等 8 个受支持版本；
+> 杂交版/其它魔改版**尚未支持**，建议先用原版。
 
 ## 架构
 
@@ -16,20 +23,47 @@
 用户调控 (pvz_agent/controller.py)：后台 stdin 线程解析命令 + F12 急停热键
 ```
 
+> 纯文本模式（`mode="text"`）不走上图视觉链路：状态来自 `pvz_memory` 读内存、动作走代码
+> 注入，但**仍截图发给主模型供其指挥**。
+
 - **两个 Agent 互相独立**：A 的描述绝不喂给 B，B 的动作决策不喂给 A，二者唯一共享的是同一帧截图与系统级配置。
 - **A/B 并发调用**：两个 VLM 请求同时发出，单轮总耗时 = max(A, B) 而非 A+B，A 的描述耗时被 B 的规划+执行掩盖。
-- **纯 VLM**：不读游戏内存、不做代码注入。模型靠看截图估阳光/冷却/僵尸，坐标由 executor 按虚拟画布换算，无需模型猜像素。
+- **纯 VLM**（视觉模式）：不读游戏内存、不做代码注入。模型靠看截图估阳光/冷却/僵尸，坐标由 executor 按虚拟画布换算，无需模型猜像素。
+
+## 运行模式（config.json `mode`）
+
+- `mode="text"`（**纯文本内存方案，当前默认/推荐，已可用**）：**不用视觉模型 / OpenCV**。
+  状态读游戏进程内存（`pvz/vendor/pvz_memory`，权威精确——阳光/卡片/植物/僵尸血量/波次全都有），
+  决策喂内存状态文本给**纯文本 LLM**（默认开思考模式），动作走代码注入执行，阳光注入器
+  自动收集。需**管理员权限** + 受支持版本（铲除/选卡仅原版 1.0.0.1051 EN）。
+- `mode="vision"`（视觉方案）：OpenCV 扫描截图识别状态 + VLM 看截图决策 + pyautogui 鼠标执行。
+
+修改 `config.json` 的 `mode` 即可切换。
+
+### text 模式独立模型配置
+
+text 模式的 AI 决策用**独立的模型配置**（`.env` 的 `TEXT_VLM_BASE_URL/MODEL/API_KEY`，
+留空回退 `VLM_*`；行为在 `config.json` 的 `text_vlm` 段：`thinking="enabled"` 开启思考、
+`max_history_rounds=6` 更多上下文、`max_output_tokens=2048`）。
+
+### text 模式行为
+- 不冻结游戏：LLM 思考期间不暂停游戏，游戏照常推进；
+- 不停循环：主循环在非可操作界面（主菜单/结算/未知）不自动暂停/停止，只轮询等待；
+- 非游戏界面不喂 LLM：只有**战斗 + 选卡界面**喂 LLM（选卡让 LLM 用 `select_seeds` 决策），
+  其余界面跳过本轮。
 
 ## 快速开始
 
 1. 复制 `.env.example` 为 `.env`，填写远程 OpenAI 兼容接口：
    ```
    VLM_BASE_URL=https://api.example.com/v1
-   VLM_MODEL=your-model-name
+   VLM_MODEL=your-model-name          # 视觉模式用
    VLM_API_KEY=sk-xxxxxxxx
+   TEXT_VLM_MODEL=your-thinking-model # 纯文本模式用（可只填这个，URL/密钥复用上面的）
    ```
-2. 启动游戏（杂交版/原版均可，窗口标题需含"植物大战僵尸"/"pvz"等关键词，可改 `config.json`）。
-3. 运行：
+2. 启动游戏（**推荐原版**；杂交版正在适配中）。程序会按 `config.json` 里 `window_titles`
+   的**精确标题**轮询查找窗口；标题不符时把窗口的精确标题写进 `window_titles`（改完保存即生效）。
+3. 运行（text 模式请用**管理员身份**运行）：
    ```bash
    LLM_PvZ_Player-main\venv\Scripts\python.exe -m pvz_agent.main
    ```
@@ -63,13 +97,17 @@
 | `sun.py` | **OpenCV 自动收集阳光**（无需 LLM 判断） |
 | `grid_scan.py` | **OpenCV 网格扫描**：检测植物/僵尸坐标注入 Agent B |
 | `grid_scan_debug.py` | **网格扫描精度检测插件**：可视化标注 |
+| `memory_engine.py` | **纯文本模式运行时**：读内存（`pvz_memory`）+ 注入执行 + 失焦不暂停看门狗 |
 | `main.py` | 主循环调度与组装 |
 
 ## 坐标体系
 
+> 本节是**视觉方案**（鼠标执行）的坐标约定。**纯文本模式**不用这些——动作走内存注入
+> （`PvZExecutor` 直接调用游戏函数），row/col 交给游戏处理，无需像素坐标。
+
 - 所有 PvZ 语义坐标基于 **800x600 虚拟画布**（`config.json` → `layout`）。
 - 战斗网格 5 行 x 9 列，`place_plant(card_index, row, col)` 0-based（row 0~4, col 0~8）。
-- executor 用 `scale_x = 实际宽/800`、`scale_y = 实际高/600` **分轴**缩放到客户区——自适应原版/杂交版不同窗口尺寸。
+- executor 用 `scale_x = 实际宽/800`、`scale_y = 实际高/600` **分轴**缩放到客户区——自适应不同窗口尺寸（视觉方案；杂交版窗口尽力适配，布局差异大时需重新校准）。
 - 非战斗 UI（主菜单/弹窗/选卡）用 `computer_use.left_click` 相对坐标 [0,1000]，模型看图估算。
 
 ## 已知局限

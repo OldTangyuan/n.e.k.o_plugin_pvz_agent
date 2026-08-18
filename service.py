@@ -48,8 +48,8 @@ DEFAULT_GOAL = "自动玩完当前这一关并尽可能取得胜利"
 # 与 pvz/pvz_agent/main.py 保持一致。
 MAX_CONSECUTIVE_FAIL = 2
 
-# 窗口标题关键词默认值（与 pvz/config.json 一致；插件未配置时兜底）。
-DEFAULT_WINDOW_KEYWORDS = [
+# 窗口精确标题默认值（与 pvz/config.json 一致；插件未配置时兜底）。
+DEFAULT_WINDOW_TITLES = [
     "plant vs zombie", "植物大战僵尸", "pvz",
     "杂交版", "plants vs. zombies", "plants vs zombies",
 ]
@@ -136,7 +136,11 @@ class PvZAgentService:
         self._img_mime = "image/jpeg"
 
         # 插件级配置（configure 填充）
-        self._window_keywords: list[str] = list(DEFAULT_WINDOW_KEYWORDS)
+        self._mode = "text"                      # "vision"=OpenCV 视觉方案 / "text"=纯文本内存方案
+        self._tool_call_mode = "fc"             # "regex"=简化正则 / "fc"=原生函数调用
+        self._window_titles: list[str] = list(DEFAULT_WINDOW_TITLES)
+        self._window_poll_interval: float = 1.0   # 等待窗口时的轮询间隔（秒）
+        self._memory_engine: Any = None           # text 模式的内存运行时（_ensure_memory 填充）
         self._notify_on_terminate = True
         self._notify_window_lost = True
         self._sun_auto_collect = True
@@ -190,9 +194,17 @@ class PvZAgentService:
     def configure(self, plugin_cfg: dict) -> None:
         """注入插件级配置（``[pvz_agent]``），含截图推送 / 开关 / 通知。"""
         with self._lock:
-            self._window_keywords = [
-                str(k) for k in plugin_cfg.get("window_title_keywords", []) if isinstance(k, str)
-            ] or list(DEFAULT_WINDOW_KEYWORDS)
+            # 运行模式："vision" / "text"（非法值回退 "vision"）
+            _mode = str(plugin_cfg.get("mode", "vision") or "vision").strip().lower()
+            self._mode = _mode if _mode in ("vision", "text") else "vision"
+            # 工具调用模式："regex" / "fc"（非法回退 "regex"）
+            _tcm = str(plugin_cfg.get("tool_call_mode", "regex") or "regex").strip().lower()
+            self._tool_call_mode = _tcm if _tcm in ("regex", "fc") else "regex"
+            # 窗口精确标题：优先新键 window_titles，兼容旧键 window_title_keywords。
+            _raw = plugin_cfg.get("window_titles") or plugin_cfg.get("window_title_keywords") or []
+            self._window_titles = [
+                str(k).strip() for k in _raw if isinstance(k, str) and str(k).strip()
+            ] or list(DEFAULT_WINDOW_TITLES)
             self._notify_on_terminate = bool(plugin_cfg.get("notify_on_terminate", True))
             self._notify_window_lost = bool(plugin_cfg.get("notify_window_lost", True))
             self._sun_auto_collect = bool(plugin_cfg.get("sun_auto_collect", True))
@@ -213,22 +225,62 @@ class PvZAgentService:
     # ------------------------------------------------------------------ #
     def _import_core(self) -> Any:
         if self._core is None:
+            import importlib
+
             import pvz_agent  # noqa: PLC0415  # pvz/ 已在 sys.path
 
             # 核心包的 __init__ 只 re-export config，不会自动导入其它子模块。
-            # 这里显式导入无 cv2 依赖的子模块，使其成为包属性（core.window 等）。
+            # 用 importlib 显式导入无 cv2 依赖的子模块，使其成为包属性
+            # （core.window / core.executor / core.planner / core.memory_engine 等）。
+            # 不用 `from pvz_agent import window` 是为了避免 ruff F401 误删
+            # （这些导入的用途是"产生包属性"副作用，不是绑定名字）。
+            # memory_engine 依赖 vendored pvz_memory（零第三方依赖），导入安全。
+            for _name in (
+                "executor", "parser", "planner", "prompts", "vlm", "window",
+                "memory_engine",
+            ):
+                importlib.import_module(f"pvz_agent.{_name}")
             self._core = pvz_agent
         return self._core
 
-    def _ensure_window(self) -> Any:
-        """找到目标窗口并创建截图器。只需窗口关键词，无需 VLM 密钥。
+    def _read_window_titles(self) -> list[str]:
+        """返回当前窗口精确标题配置：插件级标题 + 实时重读 pvz/config.json 合并。
 
-        多个匹配窗口时自动取第一个（核心的 ``pick_single`` 是交互式 input()，
-        在插件进程里会挂起，不能复用）。
+        轮询期间编辑任一配置（plugin.toml 的 [pvz_agent] / pvz/config.json 的
+        window_titles）都会在下一轮轮询生效，无需重启。
+        """
+        titles = [t for t in self._window_titles if t]
+        try:
+            cfg_path = CORE_DIR / "config.json"
+            if cfg_path.is_file():
+                j = json.loads(cfg_path.read_text(encoding="utf-8"))
+                raw = j.get("window_titles") or j.get("window_title_keywords") or []
+                for t in raw:
+                    if isinstance(t, str):
+                        t = t.strip()
+                        if t and t not in titles:
+                            titles.append(t)
+        except Exception:
+            pass
+        return titles
+
+    def _ensure_window(
+        self,
+        *,
+        timeout: float | None = None,
+        cancel: threading.Event | None = None,
+    ) -> Any:
+        """找到目标窗口并创建截图器。只需窗口标题，无需 VLM 密钥。
+
+        - 会**轮询**等待：每次轮询重读标题配置（``_read_window_titles``）并枚举
+          窗口，直到命中或 ``timeout`` 超时 / ``cancel`` 被 set（返回时抛
+          ``WindowNotFoundError``）。运行中改配置即可让新标题生效。
+        - ``timeout``：秒；``None`` = 无限等待（配合 ``cancel`` 在后台线程使用）。
+        - 多个匹配窗口时自动取第一个（核心的 ``pick_single`` 是交互式 input()，
+          在插件进程里会挂起，不能复用）。
         """
         if self._win is not None:
             return self._win
-        keywords = list(self._window_keywords)
         screenshot_dir = "screenshots"
         try:
             cfg_path = CORE_DIR / "config.json"
@@ -241,30 +293,48 @@ class PvZAgentService:
             pass
 
         core = self._import_core()
-        handles = core.window.find_target_windows(keywords)
-        if not handles:
-            raise RuntimeError(
-                "未找到匹配的 PVZ 窗口（标题含 "
-                + "/".join(keywords[:3])
-                + " 等；cmd/资源管理器/终端已被自动排除）。"
-                "请确认游戏已启动。"
+        win = core.window.wait_for_window(
+            titles_provider=self._read_window_titles,
+            timeout=timeout,
+            interval=self._window_poll_interval,
+            cancel=cancel,
+            on_try=self._log_window_wait,
+        )
+        if win is None:
+            raise core.window.WindowNotFoundError(
+                "未找到匹配的 PVZ 窗口（当前 window_titles 配置: "
+                + "/".join(self._read_window_titles()[:5])
+                + " 等；cmd/资源管理器/终端已被自动排除）。请确认游戏已启动，"
+                "或把窗口的精确标题写入配置（改完保存即生效）。"
             )
-        win = handles[0]
-        if len(handles) > 1:
-            self._logger.info("找到 %d 个匹配窗口，自动使用第一个: %s", len(handles), win.title)
+        if len(core.window.find_target_windows(self._read_window_titles())) > 1:
+            self._logger.info("找到多个匹配窗口，自动使用第一个: %s", win.title)
         self._win = win
         self._capturer = core.window.Capturer(win, screenshot_dir)
         return win
 
-    def _ensure_runtime(self) -> Any:
+    def _log_window_wait(self, attempt: int, titles: list[str]) -> None:
+        """轮询未命中时打日志（只在开头与每 10 轮提示一次，避免刷屏）。"""
+        if attempt == 0:
+            self._logger.info("[pvz-agent] 未找到 PVZ 窗口，开始轮询（标题: %s）...", titles)
+        elif attempt % 10 == 0:
+            self._logger.info("[pvz-agent] 仍在等待 PVZ 窗口（第 %d 轮，标题: %s）...", attempt + 1, titles)
+
+    def _ensure_runtime(
+        self,
+        *,
+        window_timeout: float | None = None,
+        window_cancel: threading.Event | None = None,
+    ) -> Any:
         """构建完整运行时（执行器/扫描器/VLM/planner）。
 
         需要 pvz/.env 的 AI 决策密钥（执行核心决策用）；缺失时抛 RuntimeError
         （携带指引），由调用方转成可读错误返回。反复调用幂等。
+        ``window_timeout``/``window_cancel`` 透传给窗口轮询（见 ``_ensure_window``）。
         """
         if self._planner is not None:
             return self._cfg
-        win = self._ensure_window()
+        win = self._ensure_window(timeout=window_timeout, cancel=window_cancel)
         core = self._import_core()
         try:
             cfg = core.config.load_config()
@@ -277,7 +347,13 @@ class PvZAgentService:
         cfg.sun.enabled = bool(cfg.sun.enabled) and self._sun_auto_collect
         cfg.grid_scan.enabled = bool(cfg.grid_scan.enabled) and self._scan_grid_enabled
         cfg.card_scan.enabled = bool(cfg.card_scan.enabled) and self._scan_cards_enabled
+        # 插件级 tool_call_mode 覆盖 config.json（默认 regex=简化正则）
+        cfg.tool_call_mode = self._tool_call_mode
         self._cfg = cfg
+
+        # 纯文本模式：读内存获取状态 + 注入执行，不用 OpenCV/视觉模型。
+        if self._mode == "text":
+            return self._ensure_runtime_text(core, cfg)
 
         # cv2 相关子模块（sun/grid_scan/card_scan/select_scan）模块级 import cv2。
         # opencv 在仓库的 galgame 依赖组；缺失时降级为纯 VLM 游玩（无 OpenCV 扫描）。
@@ -310,15 +386,68 @@ class PvZAgentService:
         self._vlm = core.vlm.VLMClient(cfg.vlm)
         self._img_fmt = cfg.agent.image_format
         self._img_mime = "image/png" if cfg.agent.image_format == "png" else "image/jpeg"
+        # 工具调用模式：regex=简化正则（系统提示用 XML 输出格式）；fc=原生函数调用。
+        _xml_mode = cfg.tool_call_mode == "regex"
         self._planner = core.planner.Planner(
             vlm=self._vlm,
-            system_prompt=core.prompts.build_planner_system(cfg),
+            system_prompt=core.prompts.build_planner_system_xml(cfg) if _xml_mode else core.prompts.build_planner_system(cfg),
             max_rounds=cfg.agent.max_history_rounds,
             mime=self._img_mime,
             system_prompt_xml=core.prompts.build_planner_system_xml(cfg),
+            tool_call_mode=cfg.tool_call_mode,
         )
         self._last_turn_time = time.perf_counter()
         return cfg
+
+    def _ensure_runtime_text(self, core: Any, cfg: Any) -> Any:
+        """纯文本模式运行时：内存引擎（读状态 + 注入执行）+ 文本 LLM 决策。
+
+        不构建 OpenCV 扫描器 / 阳光线程 / pyautogui 执行器；``self._executor``
+        直接指向 ``MemoryGameEngine``（接口与 ``Executor`` 对齐）。
+        """
+        engine = self._ensure_memory()  # 内存引擎（_ensure_memory 幂等，同时写 self._memory_engine）
+        self._executor = engine  # 内存引擎即执行器（接口与 Executor 对齐）
+        engine.start_force_run()   # 失焦不暂停：看门狗清 game_paused
+        self._vlm = core.vlm.VLMClient(cfg.text_vlm)  # 纯文本模式用独立模型配置（可不同模型+思考模式）
+        self._img_fmt = cfg.agent.image_format
+        self._img_mime = "image/png" if cfg.agent.image_format == "png" else "image/jpeg"
+        # 工具调用模式：regex=简化正则（用 <tool_call> 输出提示）；fc=原生函数调用。
+        _xml_mode = cfg.tool_call_mode == "regex"
+        _sys_prompt = (
+            core.prompts.build_planner_system_text_xml(cfg) if _xml_mode
+            else core.prompts.build_planner_system_text(cfg)
+        )
+        self._planner = core.planner.Planner(
+            vlm=self._vlm,
+            system_prompt=_sys_prompt,
+            max_rounds=cfg.text_max_history_rounds,  # 更多历史上下文（纯文本便宜）
+            mime=self._img_mime,
+            system_prompt_xml=_sys_prompt,
+            include_image=False,  # 纯文本：决策只看内存状态文本，不看图
+            tools_builder=core.prompts.build_planner_tools_text,
+            tool_call_mode=cfg.tool_call_mode,
+        )
+        self._last_turn_time = time.perf_counter()
+        return cfg
+
+    def _ensure_memory(self) -> Any:
+        """连接内存引擎（幂等）；失败抛 RuntimeError（携带指引）。"""
+        if self._memory_engine is not None and self._memory_engine.is_connected():
+            return self._memory_engine
+        if self._memory_engine is None:
+            self._memory_engine = self._import_core().memory_engine.MemoryGameEngine(logger=self._logger)
+        if not self._memory_engine.connect():
+            raise RuntimeError(self._memory_engine.error or "无法连接 PvZ 内存（需管理员权限 + 游戏已启动）")
+        return self._memory_engine
+
+    def _stop_memory(self) -> None:
+        """断开内存引擎（幂等）：停失焦看门狗 + 恢复注入 + 断连。"""
+        try:
+            if self._memory_engine is not None:
+                self._memory_engine.stop_force_run()
+                self._memory_engine.close()
+        except Exception:
+            pass
 
     def _runtime_ready(self) -> bool:
         return self._planner is not None
@@ -327,18 +456,35 @@ class PvZAgentService:
     #  只读操作（任何 phase 下都可用）
     # ------------------------------------------------------------------ #
     def probe(self) -> dict[str, Any]:
-        """启动自检：cv2 依赖 → 找窗口 → 截图。不抛异常，返回可读结果。"""
-        result: dict[str, Any] = {"cv2": False, "window": False, "screenshot": False}
+        """启动自检：模式依赖 → 找窗口 → 截图。不抛异常，返回可读结果。
+
+        - vision：检查 OpenCV(cv2)；
+        - text：检查内存连接（需管理员权限 + 游戏已启动）。
+        窗口/截图两种模式都保留（截图发给主模型用）。
+        """
+        result: dict[str, Any] = {"mode": self._mode, "window": False, "screenshot": False}
+        if self._mode == "text":
+            result["memory"] = False
+            try:
+                self._ensure_memory()
+                result["memory"] = True
+            except Exception as exc:
+                result["message"] = f"内存连接失败：{exc}"
+                return result
+        else:
+            result["cv2"] = False
+            try:
+                import cv2  # noqa: PLC0415, F401  # 核心的 sun/grid_scan 模块级依赖
+                result["cv2"] = True
+            except Exception:
+                result["message"] = (
+                    "缺少 opencv(cv2)。请执行 `uv sync --group galgame` 或 "
+                    "`uv pip install opencv-python-headless` 后重启插件。"
+                )
+                return result
         try:
-            result["cv2"] = True
-        except Exception:
-            result["message"] = (
-                "缺少 opencv(cv2)。请执行 `uv sync --group galgame` 或 "
-                "`uv pip install opencv-python-headless` 后重启插件。"
-            )
-            return result
-        try:
-            self._ensure_window()
+            # 启动自检：短轮询（不阻塞插件启动），窗口缺失只报状态不失败。
+            self._ensure_window(timeout=2.0)
             result["window"] = True
         except Exception as exc:
             result["message"] = f"窗口查找失败：{exc}"
@@ -369,12 +515,14 @@ class PvZAgentService:
             window_title = self._win.title if self._win is not None else ""
         return {
             "phase": phase,
+            "mode": self._mode,
             "goal": goal,
             "speed": speed,
             "running": phase == self.PHASE_RUNNING,
             "paused": phase == self.PHASE_PAUSED,
             "ready": self._runtime_ready(),
             "window": {"found": window_found, "title": window_title},
+            "memory": self._memory_status(),
             "feed": {"enabled": feed_enabled, "last_push_at": last_feed_at},
             "steps": step_count,
             "last_action_at": last_action_at,
@@ -384,16 +532,31 @@ class PvZAgentService:
             "last_feedback": last_feedback,
         }
 
+    def _memory_status(self) -> dict[str, Any]:
+        """纯文本模式的内存引擎状态（vision 模式返回空 dict）。"""
+        if self._mode != "text" or self._memory_engine is None:
+            return {}
+        return {
+            "connected": self._memory_engine.is_connected(),
+            "injector": bool(self._memory_engine.injector_ok),
+            "auto_collect": bool(self._memory_engine.auto_collect_ok),
+            "error": self._memory_engine.error,
+        }
+
     def grab_screenshot(self):
-        """截取最新一帧并返回 PIL 图片（失败抛异常，由调用方处理）。"""
-        self._ensure_window()
+        """截取最新一帧并返回 PIL 图片（失败抛异常，由调用方处理）。
+
+        被动/按需路径：窗口短轮询（最多约 5 秒），不无限等待。
+        """
+        self._ensure_window(timeout=5.0)
         assert self._capturer is not None
         return self._capturer.grab_pil()
 
     def scan_now(self) -> dict[str, Any]:
-        """对当前画面做一次 OpenCV 网格 + 卡片扫描（无需 VLM）。"""
+        """对当前状态做一次扫描：vision=OpenCV 网格+卡片；text=读内存状态文本。"""
+        if self._mode == "text":
+            return self._scan_now_text()
         try:
-            self._ensure_window()
             img = self.grab_screenshot()
         except Exception as exc:
             return {"status": "error", "message": str(exc), "summary": str(exc)}
@@ -426,6 +589,22 @@ class PvZAgentService:
             (result.get("grid_text") or "") + ("；" + result["card_text"] if result.get("card_text") else "")
         ) or "画面扫描无异常（当前可能不在战斗/选卡界面）。"
         return result
+
+    def _scan_now_text(self) -> dict[str, Any]:
+        """纯文本模式：读内存状态文本作为"扫描"结果（无需 OpenCV/VLM）。"""
+        try:
+            self._ensure_memory()
+            text = self._memory_engine.read_state_text()
+        except Exception as exc:
+            return {"status": "error", "message": str(exc), "summary": str(exc)}
+        with self._lock:
+            self._last_grid_text = text
+        return {
+            "status": "ok",
+            "grid_text": text,
+            "memory_text": text,
+            "summary": "已从游戏内存读取最新状态。",
+        }
 
     def _ensure_scan_only_runtime(self) -> None:
         """在没有 VLM 配置时，仍能按 pvz/config.json 构建 OpenCV 扫描器（幂等）。"""
@@ -476,6 +655,8 @@ class PvZAgentService:
         - 已在运行：仅更新目标；
         - 已暂停：恢复并（可选）更新目标；
         - 空闲/已停止/出错：新建循环线程（可干净重启——terminate/窗口丢失后都能再 start）。
+        - 窗口暂缺：**不阻塞**——立即返回"等待窗口"状态，由后台循环线程持续轮询
+          （每次重读 window_titles 配置），窗口出现即自动开始游玩。
         """
         with self._lock:
             phase = self._phase
@@ -483,12 +664,17 @@ class PvZAgentService:
             self.stop(reason="restart")
             phase = self.PHASE_IDLE
         try:
-            self._ensure_runtime()
+            # 短轮询：窗口在就马上开玩；不在则交给后台循环线程继续等。
+            self._ensure_runtime(window_timeout=2.0)
+            window_pending = False
         except Exception as exc:
-            with self._lock:
-                self._phase = self.PHASE_ERROR
-                self._last_error = str(exc)
-            return {"status": "error", "message": str(exc), "summary": str(exc)}
+            window_pending = self._is_window_error(exc)
+            if not window_pending:
+                with self._lock:
+                    self._phase = self.PHASE_ERROR
+                    self._last_error = str(exc)
+                return {"status": "error", "message": str(exc), "summary": str(exc)}
+            # 窗口缺失：继续走下面逻辑，让循环线程轮询等待
         with self._lock:
             if goal:
                 self._goal = goal.strip()
@@ -516,10 +702,23 @@ class PvZAgentService:
             self._thread.start()
         if self._sun_collector is not None and not self._sun_collector.alive:
             self._sun_collector.start()
+        if window_pending:
+            msg = (
+                "正在等待游戏窗口出现（后台会轮询 window_titles 配置，找到后自动开始游玩）。"
+                "可编辑 pvz/config.json 或插件配置里的 window_titles 指定窗口精确标题。"
+            )
+            return {"status": "ok", "message": msg, "summary": msg, "waiting_window": True, "goal": self._goal}
         # 开局：立即把一张高质量原图推给主模型，让她一开打就能看到当前战局。
         self._push_startup_screenshot()
         msg = f"已开始游玩（猫娘自己看画面操作）。目标：{self._goal}"
         return {"status": "ok", "message": msg, "summary": msg, "goal": self._goal}
+
+    def _is_window_error(self, exc: Exception) -> bool:
+        """判断异常是否为"窗口未找到"（区别于缺密钥等其它运行时错误）。"""
+        try:
+            return isinstance(exc, self._import_core().window.WindowNotFoundError)
+        except Exception:
+            return False
 
     def pause(self, reason: str = "user") -> dict[str, Any]:
         with self._lock:
@@ -591,6 +790,7 @@ class PvZAgentService:
         """停止并清理（插件 shutdown 时调用）。"""
         self.stop_observer()
         self.stop(reason="plugin_shutdown")
+        self._stop_memory()
 
     # ------------------------------------------------------------------ #
     #  主模型观察通道（周期截图）：观察线程
@@ -683,8 +883,11 @@ class PvZAgentService:
 
     def _push_startup_screenshot(self) -> None:
         """开始游玩时，立即把一张高质量原图推给主模型（开局画面），
-        让她一开打就能看到当前战局。算作一次 nudge（更新节流时间戳）。"""
-        if self._on_observation is None:
+        让她一开打就能看到当前战局。算作一次 nudge（更新节流时间戳）。
+
+        窗口尚未就绪（``_win`` 为空）时直接跳过，不触发窗口轮询。
+        """
+        if self._on_observation is None or self._win is None or self._capturer is None:
             return
         jpeg = self._nudge_frame()
         if jpeg is None:
@@ -758,6 +961,20 @@ class PvZAgentService:
     #  后台主循环（实时游玩执行）
     # ------------------------------------------------------------------ #
     def _loop(self) -> None:
+        # 运行时未就绪（通常是启动时窗口暂缺）→ 在本线程轮询等待窗口并构建运行时。
+        # 每次轮询重读 window_titles 配置，改配置即可让新标题生效；stop 可随时打断。
+        if self._planner is None:
+            try:
+                self._ensure_runtime(window_timeout=None, window_cancel=self._stop_evt)
+            except Exception as exc:
+                with self._lock:
+                    self._last_error = str(exc)
+                    # 主动停止不算错误
+                    self._phase = self.PHASE_IDLE if self._stop_evt.is_set() else self.PHASE_ERROR
+                self._logger.warning("[pvz-agent] 运行时构建失败，停止循环: %s", exc)
+                self._stop_sun()
+                self._stop_memory()
+                return
         while not self._stop_evt.is_set():
             if self._pause_evt.is_set():
                 # 暂停中：只观察不执行，短睡以响应 resume/stop
@@ -772,6 +989,7 @@ class PvZAgentService:
                 self._logger.warning("[pvz-agent] 本轮异常: %s", exc)
                 self._sleep_interruptible(1.0)
         self._stop_sun()
+        self._stop_memory()
         self._logger.info("[pvz-agent] 主循环已退出。")
 
     def _sleep_interruptible(self, seconds: float) -> None:
@@ -783,10 +1001,17 @@ class PvZAgentService:
             self._wake_evt.clear()
 
     def _tick(self) -> None:
-        """一轮迭代：拍帧 → 消费指令 → 扫描 → 执行核心规划 → 执行 → 反馈。"""
+        """一轮迭代（按模式分支）：vision 看截图+OpenCV；text 读内存状态文本。"""
         cfg = self._cfg
+        assert cfg is not None and self._capturer is not None
+        if self._mode == "text":
+            return self._tick_text(cfg)
+        return self._tick_vision(cfg)
+
+    def _tick_vision(self, cfg) -> None:
+        """视觉方案一轮迭代：拍帧 → 消费指令 → OpenCV 扫描 → VLM 规划 → 执行。"""
         capturer = self._capturer
-        assert cfg is not None and capturer is not None
+        assert capturer is not None
 
         # 1. 拍一帧（供执行核心复用）
         try:
@@ -797,8 +1022,7 @@ class PvZAgentService:
             return
 
         # 2. 消费主模型注入的自然语言引导
-        notes = self._drain_instructions()
-        for note in notes:
+        for note in self._drain_instructions():
             self._planner.add_user_note(note)
 
         # 3. OpenCV 网格/卡片扫描（执行核心辅助信息）
@@ -822,8 +1046,87 @@ class PvZAgentService:
         )
 
         # 4. 执行核心（VLM）规划：看截图 + 目标/引导 → 具体动作
+        calls, raw = self._plan_tick(img_b64, user_text)
+        if calls is None:
+            return  # 规划失败已通报
+        if self._stop_evt.is_set():
+            return  # 规划期间被 stop，不执行动作
+        self._execute_and_feedback(calls, raw, cfg)
+
+    def _tick_text(self, cfg) -> None:
+        """纯文本模式一轮迭代：消费指令 → 读内存状态 → 文本 LLM 规划 → 注入执行。
+
+        决策不依赖截图/OpenCV；截图仍由观察线程发给主模型指挥。
+        """
+        # 1. 消费主模型注入的自然语言引导
+        for note in self._drain_instructions():
+            self._planner.add_user_note(note)
+
+        # 2. 读内存状态（权威文本，一切决策依据）
         try:
-            calls, raw = self._planner.plan(img_b64, user_text)
+            state = self._memory_engine.read_state()
+        except Exception as exc:
+            with self._lock:
+                self._last_error = str(exc)
+            self._logger.warning("[pvz-agent] 内存状态读取失败: %s", exc)
+            self._notify_throttled(
+                f"[PVZ] 内存状态读取失败（{exc}）。", kind="action_error", cooldown=30.0,
+            )
+            if not self._memory_engine.is_connected():
+                # 游戏进程/内存断开 → 视为游戏丢失，彻底停止（可再 start）
+                self._notify_text(
+                    f"[PVZ] 游戏进程/内存已断开（{exc}）。已停止游玩；确认游戏运行后可重新开始。",
+                    kind="window_lost",
+                )
+                self._stop_loop(self.PHASE_IDLE)
+            self._sleep_interruptible(1.0)
+            return
+
+        # 2.1 非可操作界面（主菜单/结算/未知）：不喂 LLM，只轮询等待。
+        #     设计决策：LLM 思考期间**不冻结游戏**（不用 pause_for_thinking）；循环在
+        #     非可操作界面**绝不自动 pause/stop**——短睡后继续轮询，让游戏自行推进。
+        if not self._memory_engine.is_actionable(state):
+            with self._lock:
+                self._last_grid_text = self._memory_engine.format_state(state)
+            self._logger.info(
+                "[pvz-agent] 非战斗界面，跳过本轮 LLM 决策（UI=%s）", getattr(state, "game_ui", "?")
+            )
+            self._notify_throttled(
+                f"[PVZ] 当前处于非战斗界面（UI={getattr(state, 'game_ui', '?')}），"
+                "等待进入选卡/战斗...",
+                kind="no_action", cooldown=60.0,
+            )
+            self._sleep_interruptible(1.0)
+            return
+
+        memory_text = self._memory_engine.read_state_text(
+            state, fallback_grid=(cfg.layout.rows, cfg.layout.cols)
+        )
+
+        now = time.perf_counter()
+        elapsed = now - self._last_turn_time
+        self._last_turn_time = now
+
+        user_text = self._core.prompts.build_planner_user_footer(
+            goal=self._goal,
+            elapsed=elapsed,
+            last_summary=self._last_feedback,
+            note="",
+            memory_state=memory_text,
+        )
+
+        # 3. 文本 LLM 规划（include_image=False，不传图）
+        calls, raw = self._plan_tick("", user_text)
+        if calls is None:
+            return
+        if self._stop_evt.is_set():
+            return
+        self._execute_and_feedback(calls, raw, cfg)
+
+    def _plan_tick(self, img_b64: str, user_text: str):
+        """规划一次（两种模式共用错误处理）；失败返回 (None, None)。"""
+        try:
+            return self._planner.plan(img_b64, user_text)
         except Exception as exc:
             with self._lock:
                 self._last_error = str(exc)
@@ -834,11 +1137,13 @@ class PvZAgentService:
                 cooldown=30.0,
             )
             self._sleep_interruptible(2)
-            return
-        if self._stop_evt.is_set():
-            return  # 规划期间被 stop，不执行动作
+            return None, None
 
-        # 5. 执行动作
+    def _execute_and_feedback(self, calls, raw, cfg) -> None:
+        """执行动作 → 反馈回填 → 节拍等待（两种模式共用）。
+
+        ``calls`` 来自 planner（可能为空列表）；``raw`` 是模型原始输出。
+        """
         results: list[dict] = []
         if not calls:
             # 空动作：绝不静默——通报主模型（按连续轮数节流/升级）
@@ -883,7 +1188,7 @@ class PvZAgentService:
                     stop_round = True
                     break
 
-        # 6. 反馈回填给执行核心
+        # 反馈回填给执行核心
         self._planner.add_assistant(raw)
         feedback = _build_feedback(results)
         self._planner.add_feedback(feedback)
@@ -911,7 +1216,7 @@ class PvZAgentService:
 
         if stop_round:
             self._planner.add_user_note(
-                "上轮同一动作连续失败多次。请停止重复，重新观察截图，换一个目标或调整坐标。"
+                "上轮同一动作连续失败多次。请停止重复，重新观察战局状态，换一个目标或调整坐标。"
             )
             self._notify_throttled(
                 "[PVZ] 连续重复操作失败，已中止本轮并自动换打法；"
@@ -920,7 +1225,7 @@ class PvZAgentService:
                 cooldown=30.0,
             )
 
-        # 7. 节拍等待（可被命令唤醒）
+        # 节拍等待（可被命令唤醒）
         self._sleep_interruptible(self._compute_wait_seconds(results, cfg))
 
     # ------------------------------------------------------------------ #

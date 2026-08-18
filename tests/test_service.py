@@ -21,6 +21,8 @@ if sys.platform != "win32":
     )
 
 import asyncio
+import json
+import time
 import unittest.mock as mock
 from contextlib import contextmanager
 
@@ -36,6 +38,9 @@ from plugin.plugins.pvz_agent.service import (
 from plugin.sdk.plugin.llm_tool import collect_llm_tool_methods
 from plugin.sdk.plugin.ui import UI_ACTION_META_ATTR, UI_CONTEXT_META_ATTR
 from plugin.sdk.shared.constants import EVENT_META_ATTR
+
+# pvz 核心（service 模块已在 import 时把 pvz/ 加入 sys.path）
+from pvz_agent.window import WindowNotFoundError
 
 # pvz 核心（service 模块已在 import 时把 pvz/ 加入 sys.path）
 from pvz_agent.executor import Executor, LayoutConfig
@@ -94,7 +99,7 @@ def test_initial_status_is_idle() -> None:
 def test_configure_toggles() -> None:
     svc = _make_service()
     svc.configure({
-        "window_title_keywords": ["植物大战僵尸"],
+        "window_titles": ["植物大战僵尸"],
         "screenshot_feed_enabled": False,
         "screenshot_feed_interval": 5.0,
         "screenshot_max_edge_px": 512,
@@ -105,7 +110,7 @@ def test_configure_toggles() -> None:
         "notify_on_terminate": False,
         "notify_window_lost": False,
     })
-    assert svc._window_keywords == ["植物大战僵尸"]
+    assert svc._window_titles == ["植物大战僵尸"]
     assert svc._feed_enabled is False
     assert svc._sun_auto_collect is False
     assert svc._scan_grid_enabled is False
@@ -122,6 +127,435 @@ def test_configure_card_position_mode() -> None:
     assert svc._card_position_mode == "fixed"
     svc.configure({"card_position_mode": "invalid"})  # 非法值回退默认
     assert svc._card_position_mode == "opencv"
+
+
+def test_configure_falls_back_to_legacy_window_title_keywords() -> None:
+    svc = _make_service()
+    svc.configure({"window_title_keywords": ["旧版标题"]})  # 旧键仍兼容
+    assert svc._window_titles == ["旧版标题"]
+
+
+def test_read_window_titles_merges_plugin_and_config_json(tmp_path) -> None:
+    svc = _make_service()
+    svc.configure({"window_titles": ["插件标题"]})
+    (tmp_path / "config.json").write_text(
+        json.dumps({"window_titles": ["精确标题A", "精确标题B"]}), encoding="utf-8"
+    )
+    with mock.patch.object(service_module, "CORE_DIR", tmp_path):
+        titles = svc._read_window_titles()
+    assert "插件标题" in titles
+    assert "精确标题A" in titles and "精确标题B" in titles
+
+
+# --------------------------------------------------------------------------- #
+#  service：纯文本模式（mode="text"）
+# --------------------------------------------------------------------------- #
+def test_configure_mode_text_and_invalid_fallback() -> None:
+    svc = _make_service()
+    svc.configure({"mode": "text"})
+    assert svc._mode == "text"
+    svc.configure({"mode": "invalid"})
+    assert svc._mode == "vision"  # 非法值回退 vision
+    svc.configure({"mode": ""})
+    assert svc._mode == "vision"  # 空值回退 vision
+
+
+def test_ensure_runtime_text_builds_memory_engine_no_cv2() -> None:
+    """text 模式运行时：executor=内存引擎、planner=文本模式、无 OpenCV 扫描器/阳光线程。"""
+    svc = _make_service()
+    svc.configure({"mode": "text"})
+    fake_engine = mock.Mock()
+    fake_engine.is_connected.return_value = True
+    with mock.patch.object(svc, "_ensure_memory", return_value=fake_engine):
+        cfg = mock.Mock()
+        cfg.agent.image_format = "jpeg"
+        cfg.agent.max_history_rounds = 1
+        core = mock.Mock()
+        core.vlm.VLMClient.return_value = mock.Mock()
+        core.planner.Planner.return_value = mock.Mock()
+        core.prompts.build_planner_system_text.return_value = "sys"
+        svc._ensure_runtime_text(core, cfg)
+    assert svc._executor is fake_engine
+    assert svc._grid_scanner is None and svc._card_scanner is None
+    assert svc._sun_collector is None
+    # 文本 planner：include_image=False + 文本工具集
+    _, kw = core.planner.Planner.call_args
+    assert kw["include_image"] is False
+    assert kw["tools_builder"] is core.prompts.build_planner_tools_text
+
+
+def test_tick_text_feeds_memory_state_to_planner_no_image() -> None:
+    """text 模式一轮：读内存状态 → 文本 user 消息（无图、无 OpenCV 段）。"""
+    svc = _make_service()
+    svc.configure({"mode": "text"})
+    svc._memory_engine = mock.Mock()
+    state = mock.Mock()
+    state.in_battle = True
+    svc._memory_engine.read_state.return_value = state
+    svc._memory_engine.is_actionable.return_value = True
+    svc._memory_engine.read_state_text.return_value = "阳光:150\n卡片:卡0(向日葵,可用)"
+    svc._memory_engine.is_connected.return_value = True
+    svc._goal = "赢"
+    svc._last_feedback = ""
+    svc._last_turn_time = time.perf_counter() - 1.0
+    svc._drain_instructions = mock.Mock(return_value=[])
+    svc._handle_no_actions = mock.Mock()
+    svc._sleep_interruptible = mock.Mock()
+    svc._compute_wait_seconds = mock.Mock(return_value=0.01)
+    captured: dict = {}
+    svc._core = mock.Mock()
+    svc._core.prompts.build_planner_user_footer = lambda **kw: kw  # 返回 kwargs 便于断言
+    svc._planner = mock.Mock()
+    svc._planner.plan.side_effect = lambda img_b64, user_text: captured.update(
+        img_b64=img_b64, user_text=user_text
+    ) or ([], "raw")
+    cfg = mock.Mock()
+    cfg.layout.rows = 5
+    cfg.layout.cols = 9
+    svc._tick_text(cfg)
+    assert captured["img_b64"] == ""                       # 不传图
+    assert "阳光:150" in captured["user_text"]["memory_state"]
+    assert not captured["user_text"].get("grid_state")     # 无 OpenCV 段
+    # 棋盘以内存为准：read_state_text 收到 config 行列作为 fallback
+    _, kw = svc._memory_engine.read_state_text.call_args
+    assert kw.get("fallback_grid") == (5, 9)
+
+
+def test_tick_text_skips_llm_on_non_actionable_screen() -> None:
+    """非战斗界面（主菜单/结算）：不喂 LLM、不暂停不停循环，只轮询等待。"""
+    svc = _make_service()
+    svc.configure({"mode": "text"})
+    svc._memory_engine = mock.Mock()
+    state = mock.Mock()
+    state.in_battle = False
+    state.game_ui = 1  # MAIN_MENU
+    svc._memory_engine.read_state.return_value = state
+    svc._memory_engine.is_connected.return_value = True
+    svc._memory_engine.is_actionable.return_value = False
+    svc._drain_instructions = mock.Mock(return_value=[])
+    svc._sleep_interruptible = mock.Mock()
+    svc._notify_throttled = mock.Mock()
+    svc._planner = mock.Mock()
+    svc._tick_text(mock.Mock())
+    svc._planner.plan.assert_not_called()  # 非可操作界面不消耗 LLM
+    svc._sleep_interruptible.assert_called_once_with(1.0)  # 只轮询等待，不暂停/停止
+
+
+def test_memory_engine_control_actions_without_connect() -> None:
+    from pvz_agent.memory_engine import MemoryGameEngine
+
+    eng = MemoryGameEngine()
+    assert eng.execute_tool_call("terminate", {"status": "success"})["status"] == "ok"
+    assert eng.execute_tool_call("wait", {"time": 2.0})["waited"] == 2.0
+    assert eng.execute_tool_call("answer", {"text": "hi"})["text"] == "hi"
+    # 游戏动作在未连接时报错（不崩溃）
+    res = eng.execute_tool_call("place_plant", {"card_index": 0, "row": 0, "col": 0})
+    assert res["status"] == "error"
+
+
+def test_memory_engine_execute_game_action_with_fresh_state() -> None:
+    from pvz_agent.memory_engine import MemoryGameEngine
+
+    eng = MemoryGameEngine()
+    eng._mem = mock.Mock()
+    eng._mem.is_connected.return_value = True
+    state = mock.Mock()
+    state.in_battle = True
+    eng._reader = mock.Mock()
+    eng._reader.read_state.return_value = state
+    eng._executor = mock.Mock()
+    eng._executor.can_execute.return_value = True
+    eng._executor.execute.return_value = {"action": "place_plant", "status": "ok"}
+    res = eng.execute_tool_call("place_plant", {"card_index": 0, "row": 0, "col": 0})
+    assert res["status"] == "ok"
+    eng._executor.execute.assert_called_once_with(
+        "place_plant", {"card_index": 0, "row": 0, "col": 0}, state
+    )
+
+
+def test_memory_engine_place_plant_outside_battle_errors() -> None:
+    from pvz_agent.memory_engine import MemoryGameEngine
+
+    eng = MemoryGameEngine()
+    eng._mem = mock.Mock()
+    eng._mem.is_connected.return_value = True
+    state = mock.Mock()
+    state.in_battle = False
+    eng._reader = mock.Mock()
+    eng._reader.read_state.return_value = state
+    eng._executor = mock.Mock()
+    eng._executor.can_execute.return_value = True
+    res = eng.execute_tool_call("shovel", {"row": 0, "col": 0})
+    assert res["status"] == "error"
+    assert "不在战斗" in res["error"]
+    eng._executor.execute.assert_not_called()
+
+
+def test_planner_text_mode_uses_text_tools_and_no_image() -> None:
+    from pvz_agent.config import AppConfig
+    from pvz_agent.planner import Planner
+    from pvz_agent.prompts import build_planner_system_text, build_planner_tools_text
+
+    captured: dict = {}
+
+    class _FakeVLM:
+        def chat_with_tools(self, img_b64, history, user_text, tools, mime="image/png", include_image=True):
+            captured["include_image"] = include_image
+            captured["tools"] = [t["function"]["name"] for t in tools]
+            return None, "x"
+
+    planner = Planner(
+        _FakeVLM(), build_planner_system_text(AppConfig()),
+        max_rounds=1, include_image=False, tools_builder=build_planner_tools_text,
+        tool_call_mode="fc",  # 本用例验证 fc 模式的工具集透传
+    )
+    planner.plan("", "【内存状态】阳光:150")
+    assert captured["include_image"] is False
+    assert "win_level" in captured["tools"] and "left_click" not in captured["tools"]
+
+
+def test_planner_regex_mode_extracts_tool_call_no_fc() -> None:
+    """regex 模式（默认/简化）：不调 chat_with_tools，走 chat_with_image + 正则提取。"""
+    from pvz_agent.config import AppConfig
+    from pvz_agent.planner import Planner
+    from pvz_agent.prompts import build_planner_system_text_xml
+
+    captured: dict = {}
+
+    class _FakeVLM:
+        def chat_with_image(self, img_b64, history, user_text, include_image, mime):
+            captured["img_b64"] = img_b64
+            captured["include_image"] = include_image
+            return '<tool_call>{"name": "place_plant", "arguments": {"card_index": 0, "row": 1, "col": 2}}</tool_call>', ""
+
+        def chat_with_tools(self, *a, **k):
+            raise AssertionError("regex 模式不应调用 chat_with_tools")
+
+    planner = Planner(
+        _FakeVLM(), build_planner_system_text_xml(AppConfig()),
+        max_rounds=1, include_image=False, tool_call_mode="regex",
+    )
+    calls, raw = planner.plan("", "【内存状态】阳光:150")
+    assert captured["img_b64"] == ""                     # 不传图
+    assert captured["include_image"] is False
+    assert len(calls) == 1
+    assert calls[0].name == "place_plant"
+    assert calls[0].arguments == {"card_index": 0, "row": 1, "col": 2}
+    assert "<tool_call>" in raw
+
+
+def test_planner_fc_mode_uses_native_function_calling() -> None:
+    """fc 模式：仍走原生 function calling（chat_with_tools）。"""
+    from pvz_agent.planner import Planner
+
+    captured: dict = {}
+
+    class _FakeVLM:
+        def chat_with_tools(self, img_b64, history, user_text, tools, mime="image/png", include_image=True):
+            captured["include_image"] = include_image
+            captured["tools"] = [t["function"]["name"] for t in tools]
+            return [{"name": "place_plant", "arguments": {"card_index": 0, "row": 1, "col": 2}}], ""
+
+    planner = Planner(_FakeVLM(), "sys", max_rounds=1, tool_call_mode="fc")
+    calls, _raw = planner.plan("IMG", "text")
+    assert calls[0].name == "place_plant"
+    assert captured["include_image"] is True
+    assert "place_plant" in captured["tools"]
+
+
+def test_config_tool_call_mode_parsed_and_invalid_fallback() -> None:
+    from pvz_agent import config as cfg_mod
+
+    # 通过 load_config 读取（用临时 config.json，只关心 tool_call_mode 字段）
+    import tempfile
+    from pathlib import Path
+
+    tmp = Path(tempfile.mkdtemp())
+    env = tmp / ".env"
+    env.write_text("VLM_BASE_URL=https://v/v1\nVLM_MODEL=m\nVLM_API_KEY=k\n", encoding="utf-8")
+    good = tmp / "config.json"
+    good.write_text(json.dumps({"tool_call_mode": "fc"}), encoding="utf-8")
+    with mock.patch.object(cfg_mod, "ENV_FILE", env), mock.patch.object(cfg_mod, "CONFIG_FILE", good):
+        assert cfg_mod.load_config().tool_call_mode == "fc"
+    good2 = tmp / "config.json"
+    good2.write_text(json.dumps({"tool_call_mode": "regex"}), encoding="utf-8")
+    with mock.patch.object(cfg_mod, "ENV_FILE", env), mock.patch.object(cfg_mod, "CONFIG_FILE", good2):
+        assert cfg_mod.load_config().tool_call_mode == "regex"
+    bad = tmp / "config.json"
+    bad.write_text(json.dumps({"tool_call_mode": "invalid"}), encoding="utf-8")
+    with mock.patch.object(cfg_mod, "ENV_FILE", env), mock.patch.object(cfg_mod, "CONFIG_FILE", bad):
+        assert cfg_mod.load_config().tool_call_mode == "regex"  # 非法回退 regex
+
+
+def test_memory_engine_grid_dims_from_memory_and_fallback() -> None:
+    """棋盘行数以读内存为准（割草机数量），列数回退；读失败回退 config。"""
+    from pvz_agent.memory_engine import MemoryGameEngine
+
+    eng = MemoryGameEngine()
+    eng._mem = mock.Mock()
+    eng._mem.main_object = 0x1000
+    eng._mem.offsets = mock.Mock()
+    eng._mem.offsets.lawn_mower_count_max = 0x104
+    eng._mem.read_int.return_value = 6  # 泳池关 6 行
+    assert eng.grid_dims(fallback=(5, 9)) == (6, 9)   # 行数以内存为准
+    eng._mem.read_int.side_effect = RuntimeError("read fail")
+    assert eng.grid_dims(fallback=(5, 9)) == (5, 9)   # 读失败回退配置
+
+
+def test_memory_engine_read_state_text_prepends_board_line() -> None:
+    """每轮内存状态文本顶部带【棋盘】行（行列来自内存/回退）。"""
+    from pvz_agent.memory_engine import MemoryGameEngine
+
+    eng = MemoryGameEngine()
+    eng._reader = mock.Mock()
+    eng._reader.format_state.return_value = "阳光:150"
+    eng._mem = mock.Mock()
+    eng._mem.main_object = 0x1000
+    eng._mem.offsets = mock.Mock()
+    eng._mem.offsets.lawn_mower_count_max = 0x104
+    eng._mem.read_int.return_value = 5
+    state = mock.Mock(); state.last_error = ""
+    out = eng.read_state_text(state, fallback_grid=(5, 9))
+    assert "【棋盘】5 行 x 9 列" in out
+    assert "row 0~4" in out and "col 0~8" in out
+    assert "阳光:150" in out
+
+
+def test_memory_engine_paused_by_focus_loss_and_clear() -> None:
+    """失焦判定 + 清 game_paused：失焦才干预（前台尊重手动 Esc），写 game_paused=0。"""
+    import ctypes
+
+    from pvz_agent.memory_engine import MemoryGameEngine
+
+    eng = MemoryGameEngine()
+    eng._mem = mock.Mock()
+    eng._mem._hwnd = 12345
+    eng._mem.main_object = 0x1000
+    eng._mem.offsets = mock.Mock()
+    eng._mem.offsets.game_paused = 0x164
+    eng._mem.read_int.return_value = 1   # game_paused = 1
+    eng._executor = mock.Mock()
+    eng._executor.injector = mock.Mock()
+
+    # 前台：不干预
+    with mock.patch.object(ctypes.windll.user32, "GetForegroundWindow", return_value=12345):
+        assert eng._paused_by_focus_loss() is False
+    # 失焦：需要清暂停
+    with mock.patch.object(ctypes.windll.user32, "GetForegroundWindow", return_value=99999):
+        assert eng._paused_by_focus_loss() is True
+    assert eng._is_game_paused() is True
+    assert eng._clear_game_paused() is True
+    eng._executor.injector.write_int.assert_called_once_with(0x1164, 0)  # game_paused 地址 = 0x1000+0x164
+
+    # 失焦暂停时发 Esc（走游戏恢复逻辑，真正关掉暂停面板）
+    sent: list[tuple] = []
+    with mock.patch.object(ctypes.windll.user32, "GetForegroundWindow", return_value=99999), \
+         mock.patch.object(ctypes.windll.user32, "PostMessageW", side_effect=lambda h, m, w, l: sent.append((h, m, w))):
+        eng._send_esc()
+    assert (12345, 0x0100, 0x1B) in sent  # WM_KEYDOWN VK_ESCAPE
+    assert (12345, 0x0101, 0x1B) in sent  # WM_KEYUP VK_ESCAPE
+
+
+def test_memory_engine_select_seeds_gate_and_name_resolution() -> None:
+    """选卡：名字→类型id 解析 + 同一选卡会话只选一次 + 新会话解锁。"""
+    from pvz_agent.memory_engine import MemoryGameEngine
+    from pvz_memory.reader import GameState
+    from pvz_memory.offsets import GameUI
+
+    def mk_state(ui: int) -> GameState:
+        return GameState(game_ui=ui)  # in_battle 由 game_ui 计算
+
+    eng = MemoryGameEngine()
+    eng._executor = mock.Mock()
+    eng._executor.injector = mock.Mock()
+    eng._executor.can_execute.return_value = True
+    eng._executor.execute.return_value = {"action": "select_seeds", "status": "ok"}
+    eng._mem = mock.Mock()
+    eng._mem.is_connected.return_value = True
+    eng._reader = mock.Mock()
+    eng._reader.read_state.return_value = mk_state(GameUI.SELECT_CARD)
+
+    # 1. 按名字选 → 解析成类型 id（向日葵=1, 豌豆射手=0）
+    r = eng.execute_tool_call("select_seeds", {"seeds": ["向日葵", "豌豆射手"]})
+    assert r["status"] == "ok"
+    assert eng._executor.execute.call_args[0][1]["seeds"] == [1, 0]
+    assert eng._seeds_selected is True
+
+    # 2. 同一会话再次选卡 → 拒绝
+    r2 = eng.execute_tool_call("select_seeds", {"seeds": ["坚果"]})
+    assert r2["status"] == "error" and "不能重复选卡" in r2["error"]
+
+    # 3. 战斗中选卡 → 拒绝
+    eng._seeds_selected = False
+    eng._reader.read_state.return_value = mk_state(GameUI.IN_GAME)
+    r3 = eng.execute_tool_call("select_seeds", {"seeds": ["向日葵"]})
+    assert r3["status"] == "error" and "不在选卡界面" in r3["error"]
+
+    # 4. 未知植物名 → 带指引的错误
+    eng._reader.read_state.return_value = mk_state(GameUI.SELECT_CARD)
+    r4 = eng.execute_tool_call("select_seeds", {"seeds": ["不存在的植物"]})
+    assert r4["status"] == "error" and "未知植物名" in r4["error"]
+
+    # 5. 离开选卡 → 再进新选卡会话 → 解锁（下一关）
+    eng._seeds_selected = True
+    eng._prev_in_select = True
+    eng._reader.read_state.return_value = mk_state(GameUI.IN_GAME)
+    eng.read_state()
+    eng._reader.read_state.return_value = mk_state(GameUI.SELECT_CARD)
+    eng.read_state()
+    assert eng._seeds_selected is False
+
+
+def test_memory_engine_is_actionable() -> None:
+    from pvz_agent.memory_engine import MemoryGameEngine
+
+    eng = MemoryGameEngine()
+    battle = mock.Mock(); battle.in_battle = True
+    assert eng.is_actionable(battle) is True          # 战斗界面可操作
+    select = mock.Mock(); select.in_battle = False; select.game_ui = 2  # SELECT_CARD
+    assert eng.is_actionable(select) is True          # 选卡界面可操作（喂 LLM 决策选卡）
+    menu = mock.Mock(); menu.in_battle = False; menu.game_ui = 1  # MAIN_MENU
+    assert eng.is_actionable(menu) is False           # 主菜单不喂
+    unknown = mock.Mock(); unknown.in_battle = False; unknown.game_ui = 0
+    assert eng.is_actionable(unknown) is False        # 未知界面不喂
+
+
+def test_vlm_thinking_enabled_and_disabled_extra_body() -> None:
+    from pvz_agent.config import VLMConfig
+    from pvz_agent.vlm import VLMClient
+
+    vlm = VLMClient.__new__(VLMClient)  # 不真正初始化 OpenAI client
+    vlm.cfg = VLMConfig(thinking="enabled")
+    assert vlm._request_kwargs() == {"extra_body": {"thinking": {"type": "enabled"}}}
+    vlm.cfg = VLMConfig(thinking="disabled")
+    assert vlm._request_kwargs() == {"extra_body": {"thinking": {"type": "disabled"}}}
+    vlm.cfg = VLMConfig(thinking="")
+    assert vlm._request_kwargs() == {}
+
+
+def test_config_text_vlm_loads_and_validates_by_mode(tmp_path) -> None:
+    """text 模式：TEXT_VLM_MODEL 优先、TEXT_VLM_* 缺省回退 VLM_*；按 mode 校验对应配置。"""
+    from pvz_agent import config as cfg_mod
+
+    env = tmp_path / ".env"
+    env.write_text(
+        "VLM_BASE_URL=https://vision/v1\nVLM_MODEL=vision-model\nVLM_API_KEY=shared-key\n"
+        "TEXT_VLM_MODEL=thinking-model\n",
+        encoding="utf-8",
+    )
+    cfg_json = tmp_path / "config.json"
+    cfg_json.write_text(json.dumps({
+        "mode": "text",
+        "text_vlm": {"thinking": "enabled", "max_output_tokens": 4096, "max_history_rounds": 8},
+    }), encoding="utf-8")
+    with mock.patch.object(cfg_mod, "ENV_FILE", env), mock.patch.object(cfg_mod, "CONFIG_FILE", cfg_json):
+        app = cfg_mod.load_config()
+    assert app.mode == "text"
+    assert app.text_vlm.model == "thinking-model"     # TEXT_VLM_MODEL 优先
+    assert app.text_vlm.api_key == "shared-key"       # TEXT_VLM_API_KEY 缺省回退 VLM_API_KEY
+    assert app.text_vlm.thinking == "enabled"
+    assert app.text_vlm.max_output_tokens == 4096
+    assert app.text_max_history_rounds == 8
 
 
 def test_set_goal() -> None:
@@ -165,6 +599,20 @@ def test_start_returns_error_when_runtime_unavailable() -> None:
         result = svc.start()
     assert result["status"] == "error"
     assert svc.get_status()["phase"] == svc.PHASE_ERROR
+
+
+def test_start_returns_waiting_when_window_missing() -> None:
+    """窗口缺失：start 不报错，返回"等待窗口"态并拉起后台循环线程（由它轮询等待）。"""
+    svc = _make_service()
+    with mock.patch.object(
+        svc, "_ensure_runtime", side_effect=WindowNotFoundError("未找到匹配的 PVZ 窗口")
+    ):
+        with _no_real_threads():
+            result = svc.start()
+    assert result["status"] == "ok"
+    assert result.get("waiting_window") is True
+    assert svc.get_status()["phase"] == svc.PHASE_RUNNING  # 等待态而非错误态
+    assert svc._thread is not None  # 后台循环线程已拉起（循环内会轮询窗口）
 
 
 def test_start_when_paused_resumes() -> None:
@@ -411,6 +859,7 @@ def test_start_pushes_startup_screenshot() -> None:
 
 def test_probe_missing_cv2_is_graceful() -> None:
     svc = _make_service()
+    svc.configure({"mode": "vision"})  # 该用例专测视觉模式的 cv2 检测
     with mock.patch.dict("sys.modules", {"cv2": None}):  # import cv2 → ImportError
         result = svc.probe()
     assert result["cv2"] is False
@@ -579,7 +1028,7 @@ class _FakeToolsVLM:
 
 
 def test_planner_native_tool_calls() -> None:
-    planner = Planner(vlm=_FakeToolsVLM(calls_raw=[{"name": "place_plant", "arguments": {"card_index": 0, "row": 1, "col": 2}}]), system_prompt="sys")
+    planner = Planner(vlm=_FakeToolsVLM(calls_raw=[{"name": "place_plant", "arguments": {"card_index": 0, "row": 1, "col": 2}}]), system_prompt="sys", tool_call_mode="fc")
     calls, raw = planner.plan("img", "user")
     assert len(calls) == 1
     assert calls[0].name == "place_plant"
@@ -590,7 +1039,7 @@ def test_planner_native_tool_calls() -> None:
 
 def test_planner_falls_back_when_tools_unsupported() -> None:
     vlm = _FakeToolsVLM(raise_on_tools=True)
-    planner = Planner(vlm=vlm, system_prompt="sys", system_prompt_xml="xml-legacy")
+    planner = Planner(vlm=vlm, system_prompt="sys", system_prompt_xml="xml-legacy", tool_call_mode="fc")
     calls, _raw = planner.plan("img", "user")
     assert len(calls) == 1
     assert calls[0].name == "pvz_action"
@@ -732,6 +1181,7 @@ def test_vlm_extract_tool_calls_shapes() -> None:
 
 
 def test_planner_last_status_text_only() -> None:
+    """模型只回文本无动作 → 降级为 wait（避免"未解析到动作"死轮）。"""
     class _V:
         def chat_with_tools(self, **kw):
             return None, "我想先观察一下局势"  # 无工具调用，只有文本
@@ -739,11 +1189,12 @@ def test_planner_last_status_text_only() -> None:
         def chat_with_image(self, **kw):
             return "", ""
 
-    planner = Planner(vlm=_V(), system_prompt="sys")
+    planner = Planner(vlm=_V(), system_prompt="sys", tool_call_mode="fc")
     calls, _raw = planner.plan("img", "user")
-    assert calls == []
-    assert planner.last_status == "parse_failed"
-    assert "观察" in planner.last_status_text
+    assert len(calls) == 1
+    assert calls[0].name == "wait"            # 文本-only 降级为 wait
+    assert planner.last_status == "ok"        # 不再判 parse_failed
+    assert "降级" in planner.last_status_text
 
 
 def test_planner_last_status_empty() -> None:

@@ -23,8 +23,22 @@ auto_start = false
 # 插件启动时是否自动开始游玩（猫娘实时操作；需游戏已打开 + pvz/.env 已配置）。
 auto_start = false
 
-# 找游戏窗口的标题关键词（cmd/资源管理器/终端等已被核心自动排除）。
-window_title_keywords = [
+# 运行模式：
+#   "vision" = OpenCV 视觉方案（默认）：OpenCV 扫描截图识别状态 + VLM 看截图决策 + 鼠标执行。
+#   "text"   = 纯文本内存方案：读 pvz_memory 获取状态（不用视觉模型/OpenCV），决策喂内存状态
+#              文本给 LLM，动作走内存注入执行；仍照常截图发给主模型供其指挥。
+#   text 模式需要管理员权限运行宿主 + 受支持的游戏版本（见 pvz/vendor/pvz_memory/README）。
+mode = "text"
+
+# 工具调用模式：
+#   "regex" = 简化正则提取（默认）：模型直接输出 <tool_call>{"name":...,"arguments":{...}}，
+#            插件用正则提取（参考 LLM_PvZ_Player 的 parser），不依赖 OpenAI 原生函数调用。
+#   "fc"    = OpenAI 原生 function calling（tools 参数）。
+tool_call_mode = "fc"
+
+# 游戏窗口的精确标题（精确匹配，不再做子串关键词匹配；cmd/资源管理器/终端等已被核心自动排除）。
+# 获取窗口时会轮询本配置 + pvz/config.json 的 window_titles，改完保存即生效、无需重启。
+window_titles = [
   "plant vs zombie", "植物大战僵尸", "pvz", "杂交版",
   "plants vs. zombies", "plants vs zombies",
 ]

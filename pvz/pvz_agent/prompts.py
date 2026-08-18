@@ -38,23 +38,25 @@ def build_narrator_system(cfg: AppConfig) -> str:
 # --------------------------------------------------------------------------- #
 #  Agent B：规划执行者（截图 + 历史 → 原生 function calling 动作）
 # --------------------------------------------------------------------------- #
+def _tool_spec(name: str, description: str, properties: dict, required: list[str]) -> dict:
+    """构造 OpenAI 风格 function-call 工具 schema。"""
+    return {
+        "type": "function",
+        "function": {
+            "name": name,
+            "description": description,
+            "parameters": {"type": "object", "properties": properties, "required": required},
+        },
+    }
+
+
 def build_planner_tools() -> list[dict]:
     """Agent B 的原生 function-call 工具 schema（OpenAI 风格 tools）。
 
     每个动作一个独立工具，模型直接产结构化调用，不再手写 <tool_call> XML。
     """
-    def _f(name: str, description: str, properties: dict, required: list[str]) -> dict:
-        return {
-            "type": "function",
-            "function": {
-                "name": name,
-                "description": description,
-                "parameters": {"type": "object", "properties": properties, "required": required},
-            },
-        }
-
     return [
-        _f(
+        _tool_spec(
             "place_plant",
             "种植植物：系统会自动点对应卡片再点网格格子。card_index 是卡片槽 0-based 索引；row/col 是战斗网格 0-based（row 0~4, col 0~8）。只有可用卡片能种（冷却/阳光不足不可用）。",
             {
@@ -64,7 +66,7 @@ def build_planner_tools() -> list[dict]:
             },
             ["card_index", "row", "col"],
         ),
-        _f(
+        _tool_spec(
             "shovel",
             "铲除指定格子上的植物（系统自动点铲子再点格子）。row/col 0-based。",
             {
@@ -73,13 +75,13 @@ def build_planner_tools() -> list[dict]:
             },
             ["row", "col"],
         ),
-        _f(
+        _tool_spec(
             "click_card",
             "只选中卡片（暂不放置）。card_index 0-based。",
             {"card_index": {"type": "integer", "description": "卡片槽索引（0 起）"}},
             ["card_index"],
         ),
-        _f(
+        _tool_spec(
             "select_seeds",
             "选卡界面：选植物库里的卡片（seeds 是植物库卡片的 0-based 索引列表），系统会自动点击选中并点开始按钮。",
             {
@@ -87,7 +89,7 @@ def build_planner_tools() -> list[dict]:
             },
             ["seeds"],
         ),
-        _f(
+        _tool_spec(
             "left_click",
             "通用左键点击（非战斗 UI：主菜单/弹窗/选卡用）。coordinate 是相对坐标 [0,1000] 的两个数字。",
             {
@@ -95,25 +97,25 @@ def build_planner_tools() -> list[dict]:
             },
             ["coordinate"],
         ),
-        _f(
+        _tool_spec(
             "key",
             "按键（如空格、回车）。",
             {"keys": {"type": "array", "items": {"type": "string"}, "description": "要按的键列表，如 ['space']"}},
             ["keys"],
         ),
-        _f(
+        _tool_spec(
             "wait",
             "等待 time 秒再继续（如等植物长好、等冷却）。",
             {"time": {"type": "number", "description": "等待秒数"}},
             ["time"],
         ),
-        _f(
+        _tool_spec(
             "terminate",
             "结束任务。看到胜利/失败画面或确定无法继续时调用。",
             {"status": {"type": "string", "enum": ["success", "failure"], "description": "结束状态"}},
             ["status"],
         ),
-        _f(
+        _tool_spec(
             "answer",
             "向用户说一句话（无游戏操作）。",
             {"text": {"type": "string", "description": "要说的话"}},
@@ -122,13 +124,166 @@ def build_planner_tools() -> list[dict]:
     ]
 
 
+def build_planner_tools_text() -> list[dict]:
+    """纯文本模式（内存驱动）的工具 schema。
+
+    与视觉模式区别：
+    - **去掉** left_click / key / drag 等鼠标 GUI 动作——纯文本模式不走鼠标；
+    - **新增** win_level（内存注入直接通关，PvZExecutor 支持）。
+    """
+    return [
+        _tool_spec(
+            "place_plant",
+            "种植植物：系统会通过内存注入直接放置。card_index 是卡片槽 0-based 索引；row/col 是战斗网格 0-based（row, col）。只有可用卡片能种（冷却/阳光不足不可用）。",
+            {
+                "card_index": {"type": "integer", "description": "卡片槽索引（0 起）"},
+                "row": {"type": "integer", "description": "行"},
+                "col": {"type": "integer", "description": "列"},
+            },
+            ["card_index", "row", "col"],
+        ),
+        _tool_spec(
+            "shovel",
+            "铲除指定格子上的植物（内存注入执行）。row/col 0-based。",
+            {
+                "row": {"type": "integer", "description": "行"},
+                "col": {"type": "integer", "description": "列"},
+            },
+            ["row", "col"],
+        ),
+        _tool_spec(
+            "click_card",
+            "只选中卡片（暂不放置）。card_index 0-based。",
+            {"card_index": {"type": "integer", "description": "卡片槽索引（0 起）"}},
+            ["card_index"],
+        ),
+        _tool_spec(
+            "select_seeds",
+            "选卡界面：按**植物名字**选卡（seeds 填植物名列表，如 [\"向日葵\",\"豌豆射手\"]，也可用类型id）。系统会自动选择并点开始按钮。每个选卡会话只能选一次。",
+            {
+                "seeds": {"type": "array", "items": {"type": "string"}, "description": "植物名列表，如 [\"向日葵\",\"豌豆射手\"]"},
+            },
+            ["seeds"],
+        ),
+        _tool_spec(
+            "win_level",
+            "直接通关本关（内存注入调用游戏通关函数）。看到胜利画面或确定这关能赢且想跳过时调用。",
+            {},
+            [],
+        ),
+        _tool_spec(
+            "wait",
+            "等待 time 秒再继续（如等植物长好、等冷却、等下一波）。",
+            {"time": {"type": "number", "description": "等待秒数"}},
+            ["time"],
+        ),
+        _tool_spec(
+            "terminate",
+            "结束任务。看到胜利/失败画面或确定无法继续时调用。",
+            {"status": {"type": "string", "enum": ["success", "failure"], "description": "结束状态"}},
+            ["status"],
+        ),
+        _tool_spec(
+            "answer",
+            "向用户说一句话（无游戏操作）。",
+            {"text": {"type": "string", "description": "要说的话"}},
+            ["text"],
+        ),
+    ]
+
+
+def build_planner_system_text(cfg: AppConfig) -> str:
+    """纯文本模式的 Agent B 系统提示。
+
+    Agent 收到的每轮 user 消息是**从游戏进程内存读出的权威结构化文本**（不是截图），
+    据此用内存注入执行动作——不需要像素坐标，也不需要看图。
+
+    棋盘行/列数以每轮【内存状态】顶部的【棋盘】为准（读内存得到，而非配置项）——
+    泳池关行数、杂交版布局可能与固定配置不同。
+    """
+    return f"""你在玩《植物大战僵尸》，这是**纯文本模式**：每轮你会收到从游戏进程内存读出的
+结构化状态文本（【内存状态】），它精确反映当前游戏状态（阳光数、卡片冷却与可用性、
+场上植物与位置、僵尸所在行与坐标、波次、UI 界面等），比截图更准。
+
+战斗网格的行列数以每轮【内存状态】中标明的【棋盘】为准（row/col 均 0-based）；
+卡片 index 0-based，与【内存状态】里卡片列表顺序一致。
+
+## 工具
+直接调用原生工具（不要输出 <tool_call> 或任何文本格式的工具调用）：
+place_plant / shovel / click_card / select_seeds / win_level / wait / terminate / answer。
+
+## 规则（简短）
+0. **每轮必须调用至少一个工具**：直接调用上面的工具；严禁只返回文本/思考而不调用工具。
+   暂时没有可种/可铲/可点的就调用 wait 等待，需要结束才 terminate，需要向用户开口才 answer。
+1. 战斗内用 place_plant 种植物：只能种【内存状态】里标为"可用"的卡片（冷却结束且阳光足够）。
+   阳光不够就 wait。已有植物的格子不能叠种（除了花盆，南瓜壳这类特殊植物）；升级植物必须种在对应的基础植物上。
+2. 改变状态后可以 wait(1~2)。单轮可连续调用多个工具（执行多个种植动作时不要种同一个卡片的植物）。
+3. 连续失败 2 次换目标，别重复种同一格子。
+4. 僵尸有威胁时优先在其所在行种植物防御；尽量把植物种在左侧（如(0,1),(1,2)等），而不是僵尸面前，灰烬植物除外，需要尽可能放到僵尸处。
+5. 需要铲掉植物时用 shovel(row,col)（如种错、被吃残、想换更强植物）。
+6. 选卡界面用 select_seeds(seeds)：seeds 填植物**名字**列表（如 ["向日葵","豌豆射手"]），
+   从【内存状态】的【可选植物库】里按名字针对性选；选卡成功一次后本轮不再重复选。
+7. 只有看到胜利/失败画面或确定无法继续才 terminate；win_level 用于你判断已稳赢想直接跳过时。
+8. 阳光已由内存注入自动收集（自动飞向阳光计数器），不需要你主动去收集。
+"""
+
+
+def build_planner_system_text_xml(cfg: AppConfig) -> str:
+    """纯文本模式的 Agent B 系统提示（**简化正则工具调用**）。
+
+    模型直接输出 ``<tool_call>{"name":..., "arguments":{...}}</tool_call>`` 文本，
+    插件用正则提取（不依赖 OpenAI 原生函数调用，兼容更多模型）。
+    工具用**原生工具名**，与文本模式注入执行器（MemoryGameEngine）对应。
+    """
+    return f"""你在玩《植物大战僵尸》，这是**纯文本模式**：每轮你会收到从游戏进程内存读出的
+结构化状态文本（【内存状态】），精确反映当前游戏状态（阳光数、卡片冷却与可用性、
+场上植物与位置、僵尸所在行与坐标、波次、UI 界面等），比截图更准。
+
+战斗网格的行列数以每轮【内存状态】中标明的【棋盘】为准（row/col 均 0-based）；
+卡片 index 0-based，与【内存状态】里卡片列表顺序一致。
+
+## 输出（严格，只输出下面格式；可连续输出多个 <tool_call>）
+<plan>
+分析规划内容
+</plan>
+<tool_call>
+{{"name": "place_plant", "arguments": {{"card_index": 0, "row": 1, "col": 2}}}}
+</tool_call>
+
+## 可用动作（name 用原生工具名，arguments 填对应参数）
+- place_plant(card_index,row,col) 种植（内存注入）
+- shovel(row,col) 铲除
+- click_card(card_index) 只选中卡片
+- select_seeds(seeds) 选卡（seeds=植物库索引列表，如 [0,1]）
+- win_level() 直接通关
+- wait(time) 等待
+- terminate(status) 结束任务
+- answer(text) 向用户说话
+
+## 规则（简短）
+0. **每轮必须输出至少一个 <tool_call>**：严禁只输出文本/思考而无 <tool_call>；
+   暂时没有可种/可铲/可点的就 wait，需要结束才 terminate，需要向用户开口才 answer。
+1. 战斗内用 place_plant：只能种【内存状态】里标为"可用"的卡片（冷却结束且阳光足够）。
+   阳光不够就 wait。已有植物的格子不能叠种；升级植物必须种在对应的基础植物上。
+2. 改变状态后可以 wait(1~2)。单轮可连续输出多个 <tool_call>（执行多个种植动作时不要种同一个卡片的植物）。
+3. 连续失败 2 次换目标，别重复种同一格子。
+4. 僵尸有威胁时优先在其所在行种植物防御；尽量把植物种在左侧（如(0,1),(1,2)等），而不是僵尸面前，灰烬植物除外，需要尽可能放到僵尸处。
+5. 需要铲掉植物时用 shovel(row,col)（如种错、被吃残、想换更强植物）。
+6. 选卡界面用 select_seeds(seeds)：seeds 填植物**名字**列表（如 ["向日葵","豌豆射手"]），
+   从【内存状态】的【可选植物库】里按名字针对性选；选卡成功一次后本轮不再重复选。
+7. 只有看到胜利/失败画面或确定无法继续才 terminate；win_level 用于你判断已稳赢想直接跳过时。
+8. 阳光已由内存注入自动收集（自动飞向阳光计数器），不需要你主动去收集。
+9. 可以先在<plan>中进行分析规划，再调用工具进行操作，分析规划字数限制在0-30字内
+"""
+
+
 def build_planner_system(cfg: AppConfig) -> str:
     """Agent B 系统提示（原生 function calling 模式）。
 
     模型直接调用工具，不再输出 <tool_call> XML。
     """
     lay = cfg.layout
-    window_title = cfg.window_title_keywords
+    window_title = cfg.window_titles
 
     coord_hint = (
         f"战斗网格 {lay.rows} 行 x {lay.cols} 列，row 0~{lay.rows-1} / col 0~{lay.cols-1}（0-based）。"
@@ -169,7 +324,7 @@ place_plant / shovel / click_card / select_seeds / left_click / key / wait / ter
 7. 需要铲掉植物时用 shovel(row,col)（如种错、植物被吃残、想换更强植物）。
 8. 选卡界面用 select_seeds(seeds)：seeds 填植物库卡片的索引（0 起、从左到右）。
    如 [0,1] 选截图植物库最左两张。系统会自动点击选中并点"开始"。
-9. 尽量把植物种在左侧，而不是僵尸面前（如(0,1),(1,2)等），灰烬植物除外，需要尽可能放到僵尸处。
+9. 尽量把植物种在左侧（如(0,1),(1,2)等），而不是僵尸面前，灰烬植物除外，需要尽可能放到僵尸处。
 10. 阳光会由自动化程序自动收集，不需要你主动去收集
 
 {version_hint}
@@ -183,7 +338,7 @@ def build_planner_system_xml(cfg: AppConfig) -> str:
     模型以文本 <tool_call> 输出动作，行为与旧版一致。
     """
     lay = cfg.layout
-    window_title = cfg.window_title_keywords
+    window_title = cfg.window_titles
 
     coord_hint = (
         f"战斗网格 {lay.rows} 行 x {lay.cols} 列，row 0~{lay.rows-1} / col 0~{lay.cols-1}（0-based）。"
@@ -249,16 +404,20 @@ def build_planner_user_footer(
     note: str = "",
     grid_state: str = "",
     card_state: str = "",
+    memory_state: str = "",
 ) -> str:
     """拼接 Agent B 每轮 user 消息的文本部分。
 
     grid_state: OpenCV 网格扫描出的植物/僵尸坐标辅助信息，如 "植物: (0,1),(1,2)；僵尸: (2,5)"。
     card_state: OpenCV 卡片扫描出的可用/不可用卡片，如 "可用卡片: 卡0,卡1；不可用卡片: 卡2"。
+    memory_state: 纯文本模式从内存读出的权威游戏状态文本（替代截图 + OpenCV 扫描）。
     """
     parts = [
         f"【目标】{goal}",
         f"【距上轮 {elapsed:.1f} 秒】",
     ]
+    if memory_state:
+        parts.append(f"【内存状态】(从游戏进程内存读取，权威准确){memory_state}")
     if grid_state:
         parts.append(f"【OpenCV检测】(仅供参考，不一定完全准确){grid_state}")
     if card_state:

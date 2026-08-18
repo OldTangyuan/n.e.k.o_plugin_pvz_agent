@@ -1,5 +1,7 @@
 {
-  "window_title_keywords": [
+  "mode": "text",
+  "tool_call_mode": "regex",
+  "window_titles": [
     "plant vs zombie",
     "植物大战僵尸",
     "pvz",
@@ -120,6 +122,16 @@
     "retry_delay": 1.0,
     "timeout": 120.0,
     "thinking": "disabled"
+  },
+  "text_vlm": {
+    "max_output_tokens": 2048,
+    "temperature": 0.3,
+    "retries": 2,
+    "retry_delay": 1.0,
+    "timeout": 120.0,
+    "thinking": "disabled",
+    "tool_choice": "regex",
+    "max_history_rounds": 4
   },
   "save_capture": false
 }

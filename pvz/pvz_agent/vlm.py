@@ -37,14 +37,16 @@ class VLMClient:
     def _request_kwargs(self) -> dict:
         """构造请求附加参数（含可选的思维链控制）。
 
-        部分模型（如 kimi-k2.5）默认开启长思维链，会大幅拖慢响应。
-        config.json 的 vlm.thinking="disabled" 时用 extra_body 关闭推理，
-        模型直接输出动作，速度可提升 2~3 倍。
+        - ``thinking="disabled"``：关闭推理（如 kimi-k2.5 默认开长思维链会拖慢，视觉模式常关）；
+        - ``thinking="enabled"``：强制开启推理（纯文本模式默认开，让模型多思考再决策）；
+        - 其它值：不传 extra_body，交给模型/服务端默认。
         """
         kw: dict = {}
         thinking = (self.cfg.thinking or "").strip().lower()
         if thinking == "disabled":
             kw["extra_body"] = {"thinking": {"type": "disabled"}}
+        elif thinking == "enabled":
+            kw["extra_body"] = {"thinking": {"type": "enabled"}}
         return kw
 
     # ------------------------------------------------------------------ #
@@ -115,15 +117,17 @@ class VLMClient:
         user_text: str,
         tools: list[dict],
         mime: str = "image/png",
+        include_image: bool = True,
     ) -> tuple[list[dict[str, Any]] | None, str]:
         """发送带原生 function calling 的请求，返回 (tool_calls, content)。
 
         Args:
-            img_b64: 最新截图的 base64 字符串。
+            img_b64: 最新截图的 base64 字符串（``include_image=False`` 时忽略）。
             history: 纯文本历史消息。
             user_text: 本轮附加的文本提示。
             tools: OpenAI 风格 tools 列表（``build_planner_tools`` 产物）。
             mime: 图片 MIME 类型。
+            include_image: 是否携带图片。False 用于纯文本模式（决策只依赖内存状态文本）。
 
         Returns:
             (tool_calls, content)：
@@ -135,7 +139,7 @@ class VLMClient:
             VLMError: 重试耗尽后抛出（provider 不支持 ``tools`` 参数时由
             Planner 捕获并回退到文本模式）。
         """
-        messages = self._build_messages(img_b64, history, user_text, True, mime)
+        messages = self._build_messages(img_b64, history, user_text, include_image, mime)
 
         # 工具选择策略：默认强制每轮调用工具（required），避免模型只回文本不行动。
         # 个别 provider 不支持 "required"，调用失败时降级 "auto" 重试。

@@ -7,6 +7,7 @@ import ctypes
 import io
 import os
 import time
+from typing import Any, Callable
 
 import win32api
 import win32con
@@ -49,11 +50,16 @@ def _is_excluded(title: str, class_name: str) -> bool:
     return False
 
 
-def _is_target(title: str, keywords: list[str]) -> bool:
+def _is_exact_title(title: str, titles: list[str]) -> bool:
+    """精确标题匹配：窗口标题 strip 后与任一配置标题全等（忽略大小写）。
+
+    不再做子串模糊匹配——模糊匹配容易误命中（如"植物大战僵尸"会命中
+    "植物大战僵尸 修改器.txt"），要求配置里写明窗口的精确标题。
+    """
     if not title:
         return False
-    lower = title.lower()
-    return any(kw in lower for kw in keywords)
+    normalized = title.strip().casefold()
+    return any(normalized == t.strip().casefold() for t in titles if t)
 
 
 def _enum_callback(hwnd: int, ctx: dict) -> bool:
@@ -61,7 +67,7 @@ def _enum_callback(hwnd: int, ctx: dict) -> bool:
         return True
     title = win32gui.GetWindowText(hwnd)
     class_name = win32gui.GetClassName(hwnd)
-    if not _is_excluded(title, class_name) and _is_target(title, ctx["keywords"]):
+    if not _is_excluded(title, class_name) and _is_exact_title(title, ctx["titles"]):
         ctx["hwnds"].append(hwnd)
     return True
 
@@ -135,11 +141,56 @@ class WindowHandle:
 # --------------------------------------------------------------------------- #
 #  查找与选择
 # --------------------------------------------------------------------------- #
-def find_target_windows(keywords: list[str]) -> list[WindowHandle]:
-    """按标题关键词查找所有可见目标窗口。"""
-    ctx = {"keywords": keywords, "hwnds": []}
+def find_target_windows(titles: list[str]) -> list[WindowHandle]:
+    """按精确标题查找所有可见目标窗口（一次快照，不做轮询）。"""
+    ctx = {"titles": titles, "hwnds": []}
     win32gui.EnumWindows(_enum_callback, ctx)
     return [WindowHandle(hwnd, win32gui.GetWindowText(hwnd)) for hwnd in ctx["hwnds"]]
+
+
+class WindowNotFoundError(RuntimeError):
+    """轮询等待窗口超时 / 被取消，未找到匹配的窗口。"""
+
+
+def wait_for_window(
+    titles_provider: Callable[[], list[str]],
+    *,
+    timeout: float | None = None,
+    interval: float = 1.0,
+    cancel: Any | None = None,
+    on_try: Callable[[int, list[str]], None] | None = None,
+) -> WindowHandle | None:
+    """轮询等待目标窗口出现。
+
+    - ``titles_provider``：每次轮询**重读**标题配置的可调用对象（返回精确标题列表）。
+      运行中修改配置，下一轮轮询即生效，无需重启。
+    - ``timeout``：最长等待秒数；``None`` = 无限等待（直到命中或被取消）。
+    - ``interval``：两轮轮询间隔（秒）。
+    - ``cancel``：``threading.Event``，被 set 时立即放弃并返回 ``None``。
+    - ``on_try``：每轮未命中时回调 ``on_try(attempt, titles)``（用于打日志提示）。
+
+    命中返回第一个匹配窗口；超时 / 取消返回 ``None``。
+    """
+    deadline = None if timeout is None else time.monotonic() + max(timeout, 0.0)
+    attempt = 0
+    while True:
+        if cancel is not None and cancel.is_set():
+            return None
+        titles = list(titles_provider() or [])
+        handles = find_target_windows(titles)
+        if handles:
+            return handles[0]
+        if deadline is not None and time.monotonic() >= deadline:
+            return None
+        if on_try is not None:
+            on_try(attempt, titles)
+        attempt += 1
+        # 用 cancel.wait 等间隔，可被取消及时唤醒
+        if cancel is not None:
+            if cancel.wait(interval):
+                return None
+        else:
+            time.sleep(interval)
 
 
 def pick_single(handles: list[WindowHandle]) -> WindowHandle:

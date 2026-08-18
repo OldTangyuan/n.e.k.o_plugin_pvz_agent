@@ -1,4 +1,6 @@
 [project]
 name = "pvz_agent"
 version = "0.2.3"
+# 运行时依赖由宿主（N.E.K.O）共享环境提供（openai/pywin32/Pillow），插件不声明以免
+# 触发宿主校验要求 vendoring；与同仓库其它插件保持一致。cv2/pvz_memory 已 vendored 在 pvz/vendor/。
 dependencies = []

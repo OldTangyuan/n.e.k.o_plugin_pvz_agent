@@ -207,14 +207,27 @@ class SelectScanConfig:
 class AppConfig:
     """全局配置。"""
 
-    vlm: VLMConfig = field(default_factory=VLMConfig)
+    # 运行模式："vision"=OpenCV 视觉方案（默认）；"text"=纯文本内存方案（读 pvz_memory，
+    # 不用视觉模型/OpenCV，决策喂内存状态文本，动作走内存注入执行）。
+    mode: str = "text"
+    # 工具调用模式："regex"=简化正则提取（默认，模型输出 <tool_call>JSON，参考 LLM_PvZ_Player
+    #   parser，不依赖原生函数调用）；"fc"=OpenAI 原生 function calling。
+    tool_call_mode: str = "fc"
+    vlm: VLMConfig = field(default_factory=VLMConfig)   # 视觉模式的模型配置
+    # 纯文本模式的模型配置：完全独立（.env 的 TEXT_VLM_* + config.json 的 text_vlm 段），
+    # 可指定不同的模型、开启思考模式、更大输出预算。
+    text_vlm: VLMConfig = field(default_factory=VLMConfig)
+    # 纯文本模式保留的历史上下文轮数（更大 = 更多上下文，纯文本便宜）
+    text_max_history_rounds: int = 6
     layout: LayoutConfig = field(default_factory=LayoutConfig)
     agent: AgentConfig = field(default_factory=AgentConfig)
     sun: SunConfig = field(default_factory=SunConfig)
     grid_scan: GridScanConfig = field(default_factory=GridScanConfig)
     card_scan: CardScanConfig = field(default_factory=CardScanConfig)
     select_scan: SelectScanConfig = field(default_factory=SelectScanConfig)
-    window_title_keywords: list[str] = field(default_factory=lambda: [
+    # 窗口精确标题（精确匹配，不再做子串关键词匹配）。
+    # 旧配置键 window_title_keywords 仍兼容读取。
+    window_titles: list[str] = field(default_factory=lambda: [
         "plant vs zombie", "植物大战僵尸", "pvz",
         "杂交版", "plants vs. zombies", "plants vs zombies",
     ])
@@ -274,6 +287,22 @@ def load_config() -> AppConfig:
         thinking=jcfg.get("vlm", {}).get("thinking", ""),
         tool_choice=jcfg.get("vlm", {}).get("tool_choice", "required"),
     )
+
+    # ---- 纯文本模式 VLM（完全独立：TEXT_VLM_* 优先，缺省回退 VLM_*；行为来自 text_vlm 段）----
+    tv = jcfg.get("text_vlm", {}) if isinstance(jcfg.get("text_vlm"), dict) else {}
+    text_vlm = VLMConfig(
+        base_url=env_get("TEXT_VLM_BASE_URL", "") or vlm.base_url,
+        model=env_get("TEXT_VLM_MODEL", "") or vlm.model,
+        api_key=env_get("TEXT_VLM_API_KEY", "") or vlm.api_key,
+        max_output_tokens=int(tv.get("max_output_tokens", 2048)),
+        temperature=float(tv.get("temperature", 0.3)),
+        retries=int(tv.get("retries", 2)),
+        retry_delay=float(tv.get("retry_delay", 1.0)),
+        timeout=float(tv.get("timeout", 120.0)),
+        thinking=str(tv.get("thinking", "enabled") or "").strip().lower(),  # text 默认开启思考
+        tool_choice=str(tv.get("tool_choice", "auto") or "auto").strip().lower(),
+    )
+    text_max_history_rounds = int(tv.get("max_history_rounds", 6))
 
     # ---- 布局（config.json）----
     lay = jcfg.get("layout", {})
@@ -378,8 +407,25 @@ def load_config() -> AppConfig:
     # ---- 选卡扫描（config.json → "select_scan"）----
     cs2 = jcfg.get("select_scan", {})
 
+    # 窗口精确标题：优先新键 window_titles，兼容旧键 window_title_keywords。
+    raw_titles = jcfg.get("window_titles", jcfg.get("window_title_keywords", AppConfig().window_titles))
+
+    # 运行模式：优先新键 mode，兼容旧值；非法值回退 "vision"。
+    _mode = str(jcfg.get("mode", "vision") or "vision").strip().lower()
+    if _mode not in ("vision", "text"):
+        _mode = "vision"
+
+    # 工具调用模式：regex=简化正则 / fc=原生函数调用；非法回退 "regex"。
+    _tool_call_mode = str(jcfg.get("tool_call_mode", "regex") or "regex").strip().lower()
+    if _tool_call_mode not in ("regex", "fc"):
+        _tool_call_mode = "regex"
+
     app = AppConfig(
+        mode=_mode,
+        tool_call_mode=_tool_call_mode,
         vlm=vlm,
+        text_vlm=text_vlm,
+        text_max_history_rounds=max(1, text_max_history_rounds),
         layout=layout,
         agent=agent,
         sun=sun,
@@ -396,23 +442,25 @@ def load_config() -> AppConfig:
             btn_bright_min=cs2.get("btn_bright_min", 100),
             debug=cs2.get("debug", False),
         ),
-        window_title_keywords=jcfg.get("window_title_keywords", AppConfig().window_title_keywords),
+        window_titles=[str(t) for t in raw_titles if isinstance(t, str)] if isinstance(raw_titles, list) else AppConfig().window_titles,
         save_capture=jcfg.get("save_capture", False),
     )
 
-    # ---- api_key 校验 ----
-    if not app.vlm.api_key:
-        print("[配置] 未找到 VLM_API_KEY。")
+    # ---- 按当前 mode 校验对应决策模型配置（text 用 text_vlm，vision 用 vlm）----
+    _decision = app.text_vlm if _mode == "text" else app.vlm
+    _env_prefix = "TEXT_VLM_" if _mode == "text" else "VLM_"
+    if not _decision.api_key:
+        print(f"[配置] 未找到 {_env_prefix}API_KEY。")
         print("请在项目根目录复制 .env.example 为 .env，并填写：")
-        print("  VLM_BASE_URL=你的OpenAI兼容接口地址（如 https://api.example.com/v1）")
-        print("  VLM_MODEL=你的模型名")
-        print("  VLM_API_KEY=你的密钥")
+        print(f"  {_env_prefix}BASE_URL=你的OpenAI兼容接口地址（如 https://api.example.com/v1）")
+        print(f"  {_env_prefix}MODEL=你的模型名")
+        print(f"  {_env_prefix}API_KEY=你的密钥")
         raise SystemExit(1)
 
-    if not app.vlm.base_url:
-        app.vlm.base_url = env_get("VLM_BASE_URL", "https://api.openai.com/v1")
-    if not app.vlm.model:
-        print("[配置] 未找到 VLM_MODEL。请在 .env 中指定模型名。")
+    if not _decision.base_url:
+        _decision.base_url = env_get(f"{_env_prefix}BASE_URL", "https://api.openai.com/v1")
+    if not _decision.model:
+        print(f"[配置] 未找到 {_env_prefix}MODEL。请在 .env 中指定模型名。")
         raise SystemExit(1)
 
     return app
