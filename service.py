@@ -358,7 +358,12 @@ class PvZAgentService:
         # cv2 相关子模块（sun/grid_scan/card_scan/select_scan）模块级 import cv2。
         # opencv 在仓库的 galgame 依赖组；缺失时降级为纯 VLM 游玩（无 OpenCV 扫描）。
         try:
-            from pvz_agent import card_scan, grid_scan, select_scan, sun  # noqa: PLC0415, F401
+            from pvz_agent import (  # noqa: PLC0415, F401
+                card_scan,
+                grid_scan,
+                select_scan,
+                sun,
+            )
             has_cv2 = True
         except ImportError as exc:
             card_scan = grid_scan = select_scan = sun = None  # type: ignore[assignment]

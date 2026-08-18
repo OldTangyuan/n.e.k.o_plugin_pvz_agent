@@ -10,16 +10,12 @@ import sys
 import threading
 import time
 from pathlib import Path
+from typing import Any
 
-# 内置依赖：cv2 / pvz_memory 在 pvz/vendor/（不随 pip 安装），加入 sys.path。
-# 支持直接从仓库根 `python -m pvz.pvz_agent.main` 运行，也兼容 pvz/ 下 `python -m pvz_agent.main`。
-_PVZ_VENDOR = Path(__file__).resolve().parent.parent / "vendor"
-if str(_PVZ_VENDOR) not in sys.path:
-    sys.path.insert(0, str(_PVZ_VENDOR))
-
+# 非 vendored 依赖的相对导入放在最顶部（避免 ruff E402）。
+# memory_engine 依赖 vendored pvz_memory，在 vendor 路径注入之后、text 分支内懒加载。
 from .config import load_config
 from .controller import Controller
-from .memory_engine import MemoryGameEngine
 from .narrator import Narrator
 from .parser import ToolCall
 from .planner import Planner
@@ -35,6 +31,12 @@ from .prompts import (
 )
 from .vlm import VLMClient
 from .window import Capturer, wait_for_window
+
+# 内置依赖：cv2 / pvz_memory 在 pvz/vendor/（不随 pip 安装），加入 sys.path。
+# 支持直接从仓库根 `python -m pvz.pvz_agent.main` 运行，也兼容 pvz/ 下 `python -m pvz_agent.main`。
+_PVZ_VENDOR = Path(__file__).resolve().parent.parent / "vendor"
+if str(_PVZ_VENDOR) not in sys.path:
+    sys.path.insert(0, str(_PVZ_VENDOR))
 
 DEFAULT_GOAL = "自动玩完当前这一关并尽可能取得胜利"
 
@@ -64,7 +66,7 @@ def _build_feedback(results: list[dict]) -> str:
     return "\n".join(lines)
 
 
-def _compute_wait(results: list[dict], executor: Executor, base: float) -> float:
+def _compute_wait(results: list[dict], executor: Any, base: float) -> float:
     """本轮等待时间 = max(基础节拍, 动作感知延迟, 模型主动 wait)。"""
     max_delay = 0.0
     has_game_action = False
@@ -103,9 +105,12 @@ class GameAgentApp:
         # 鼠标互斥锁：阳光收集线程 与 Agent B 执行器共享，同一时刻只一方点鼠标
         self.mouse_lock = threading.Lock()
 
-        self.memory_engine: MemoryGameEngine | None = None
+        self.memory_engine: Any = None
         if cfg.mode == "text":
-            # 纯文本模式：内存引擎（读状态 + 注入执行），不用 OpenCV/鼠标
+            # 纯文本模式：内存引擎（读状态 + 注入执行），不用 OpenCV/鼠标。
+            # memory_engine 依赖 vendored pvz_memory，在此懒加载。
+            from .memory_engine import MemoryGameEngine  # noqa: PLC0415
+
             self.executor = MemoryGameEngine()
             if not self.executor.connect():
                 raise RuntimeError(f"[内存] {self.executor.error}")

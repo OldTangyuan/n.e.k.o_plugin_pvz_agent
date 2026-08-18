@@ -40,13 +40,13 @@ from plugin.sdk.plugin.ui import UI_ACTION_META_ATTR, UI_CONTEXT_META_ATTR
 from plugin.sdk.shared.constants import EVENT_META_ATTR
 
 # pvz 核心（service 模块已在 import 时把 pvz/ 加入 sys.path）
-from pvz_agent.window import WindowNotFoundError
-
-# pvz 核心（service 模块已在 import 时把 pvz/ 加入 sys.path）
 from pvz_agent.executor import Executor, LayoutConfig
 from pvz_agent.parser import ToolCall
 from pvz_agent.planner import Planner, _render_tool_calls
 from pvz_agent.prompts import build_planner_tools
+
+# pvz 核心（service 模块已在 import 时把 pvz/ 加入 sys.path）
+from pvz_agent.window import WindowNotFoundError
 
 
 class _FakeLogger:
@@ -364,11 +364,11 @@ def test_planner_fc_mode_uses_native_function_calling() -> None:
 
 
 def test_config_tool_call_mode_parsed_and_invalid_fallback() -> None:
-    from pvz_agent import config as cfg_mod
-
     # 通过 load_config 读取（用临时 config.json，只关心 tool_call_mode 字段）
     import tempfile
     from pathlib import Path
+
+    from pvz_agent import config as cfg_mod
 
     tmp = Path(tempfile.mkdtemp())
     env = tmp / ".env"
@@ -414,7 +414,8 @@ def test_memory_engine_read_state_text_prepends_board_line() -> None:
     eng._mem.offsets = mock.Mock()
     eng._mem.offsets.lawn_mower_count_max = 0x104
     eng._mem.read_int.return_value = 5
-    state = mock.Mock(); state.last_error = ""
+    state = mock.Mock()
+    state.last_error = ""
     out = eng.read_state_text(state, fallback_grid=(5, 9))
     assert "【棋盘】5 行 x 9 列" in out
     assert "row 0~4" in out and "col 0~8" in out
@@ -450,7 +451,7 @@ def test_memory_engine_paused_by_focus_loss_and_clear() -> None:
     # 失焦暂停时发 Esc（走游戏恢复逻辑，真正关掉暂停面板）
     sent: list[tuple] = []
     with mock.patch.object(ctypes.windll.user32, "GetForegroundWindow", return_value=99999), \
-         mock.patch.object(ctypes.windll.user32, "PostMessageW", side_effect=lambda h, m, w, l: sent.append((h, m, w))):
+         mock.patch.object(ctypes.windll.user32, "PostMessageW", side_effect=lambda h, m, w, lp: sent.append((h, m, w))):
         eng._send_esc()
     assert (12345, 0x0100, 0x1B) in sent  # WM_KEYDOWN VK_ESCAPE
     assert (12345, 0x0101, 0x1B) in sent  # WM_KEYUP VK_ESCAPE
@@ -459,8 +460,8 @@ def test_memory_engine_paused_by_focus_loss_and_clear() -> None:
 def test_memory_engine_select_seeds_gate_and_name_resolution() -> None:
     """选卡：名字→类型id 解析 + 同一选卡会话只选一次 + 新会话解锁。"""
     from pvz_agent.memory_engine import MemoryGameEngine
-    from pvz_memory.reader import GameState
     from pvz_memory.offsets import GameUI
+    from pvz_memory.reader import GameState
 
     def mk_state(ui: int) -> GameState:
         return GameState(game_ui=ui)  # in_battle 由 game_ui 计算
@@ -510,13 +511,20 @@ def test_memory_engine_is_actionable() -> None:
     from pvz_agent.memory_engine import MemoryGameEngine
 
     eng = MemoryGameEngine()
-    battle = mock.Mock(); battle.in_battle = True
+    battle = mock.Mock()
+    battle.in_battle = True
     assert eng.is_actionable(battle) is True          # 战斗界面可操作
-    select = mock.Mock(); select.in_battle = False; select.game_ui = 2  # SELECT_CARD
+    select = mock.Mock()
+    select.in_battle = False
+    select.game_ui = 2  # SELECT_CARD
     assert eng.is_actionable(select) is True          # 选卡界面可操作（喂 LLM 决策选卡）
-    menu = mock.Mock(); menu.in_battle = False; menu.game_ui = 1  # MAIN_MENU
+    menu = mock.Mock()
+    menu.in_battle = False
+    menu.game_ui = 1  # MAIN_MENU
     assert eng.is_actionable(menu) is False           # 主菜单不喂
-    unknown = mock.Mock(); unknown.in_battle = False; unknown.game_ui = 0
+    unknown = mock.Mock()
+    unknown.in_battle = False
+    unknown.game_ui = 0
     assert eng.is_actionable(unknown) is False        # 未知界面不喂
 
 
