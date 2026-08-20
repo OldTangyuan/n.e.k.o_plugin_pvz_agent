@@ -114,6 +114,7 @@ class GameAgentApp:
             self.executor = MemoryGameEngine()
             if not self.executor.connect():
                 raise RuntimeError(f"[内存] {self.executor.error}")
+            self.executor.set_seed_selection_enabled(cfg.agent_controls_seed_selection)
             self.executor.start_force_run()  # 失焦不暂停：看门狗清 game_paused
             self.memory_engine = self.executor
             self.sun_collector = None

@@ -1,5 +1,6 @@
 {
   "mode": "text",
+  "agent_controls_seed_selection": false,
   "tool_call_mode": "regex",
   "window_titles": [
     "plant vs zombie",
@@ -7,7 +8,8 @@
     "pvz",
     "杂交版",
     "plants vs. zombies",
-    "plants vs zombies"
+    "plants vs zombies",
+    "植物大战僵尸中文版"
   ],
   "layout": {
     "canvas_w": 800,

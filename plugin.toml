@@ -30,6 +30,11 @@ auto_start = false
 #   text 模式需要管理员权限运行宿主 + 受支持的游戏版本（见 pvz/vendor/pvz_memory/README）。
 mode = "text"
 
+# 是否允许 AgentB 操控选卡界面（默认关）。
+#   false = 选卡场景不触发 LLM，由你手动选卡后进入战斗（推荐）；
+#   true  = 选卡界面也喂 LLM，让模型按【可选植物库】用 select_seeds 自动选卡。
+agent_controls_seed_selection = false
+
 # 工具调用模式：
 #   "regex" = 简化正则提取（默认）：模型直接输出 <tool_call>{"name":...,"arguments":{...}}，
 #            插件用正则提取（参考 LLM_PvZ_Player 的 parser），不依赖 OpenAI 原生函数调用。
@@ -40,7 +45,7 @@ tool_call_mode = "fc"
 # 获取窗口时会轮询本配置 + pvz/config.json 的 window_titles，改完保存即生效、无需重启。
 window_titles = [
   "plant vs zombie", "植物大战僵尸", "pvz", "杂交版",
-  "plants vs. zombies", "plants vs zombies",
+  "plants vs. zombies", "plants vs zombies", "植物大战僵尸中文版",
 ]
 
 # ── 猫娘观察通道（周期推送纯截图，猫娘是玩家）──

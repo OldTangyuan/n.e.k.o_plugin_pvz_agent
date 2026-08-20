@@ -475,6 +475,10 @@ def test_memory_engine_select_seeds_gate_and_name_resolution() -> None:
     eng._mem.is_connected.return_value = True
     eng._reader = mock.Mock()
     eng._reader.read_state.return_value = mk_state(GameUI.SELECT_CARD)
+    # 默认关：不允许 AgentB 选卡
+    r0 = eng.execute_tool_call("select_seeds", {"seeds": ["向日葵"]})
+    assert r0["status"] == "error" and "手动控制" in r0["error"]
+    eng.set_seed_selection_enabled(True)  # 本用例测"允许 AgentB 选卡"时的门控
 
     # 1. 按名字选 → 解析成类型 id（向日葵=1, 豌豆射手=0）
     r = eng.execute_tool_call("select_seeds", {"seeds": ["向日葵", "豌豆射手"]})
@@ -517,7 +521,9 @@ def test_memory_engine_is_actionable() -> None:
     select = mock.Mock()
     select.in_battle = False
     select.game_ui = 2  # SELECT_CARD
-    assert eng.is_actionable(select) is True          # 选卡界面可操作（喂 LLM 决策选卡）
+    assert eng.is_actionable(select) is False         # 默认关：选卡不触发 LLM（玩家手动选卡）
+    eng.set_seed_selection_enabled(True)
+    assert eng.is_actionable(select) is True          # 开启后：选卡界面可操作（喂 LLM 决策选卡）
     menu = mock.Mock()
     menu.in_battle = False
     menu.game_ui = 1  # MAIN_MENU

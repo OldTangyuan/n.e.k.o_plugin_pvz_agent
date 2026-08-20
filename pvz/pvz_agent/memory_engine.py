@@ -48,6 +48,8 @@ class MemoryGameEngine:
         # 选卡门控：同一选卡会话只允许选一次，防止模型反复 select_seeds 出问题。
         self._seeds_selected = False   # 本会话已选卡
         self._prev_in_select = False   # 上一轮是否处于选卡界面（用于检测新选卡会话）
+        # 是否允许 AgentB 操控选卡界面（默认关：选卡场景不触发 LLM，由玩家手动选卡）。
+        self._allow_seed_selection = False
 
     # ------------------------------------------------------------------ #
     #  连接 / 断开
@@ -179,15 +181,25 @@ class MemoryGameEngine:
     # GameUI.SELECT_CARD = 2（与 pvz_memory.offsets.GameUI 一致，避免额外导入）
     _GAME_UI_SELECT_CARD = 2
 
+    def set_seed_selection_enabled(self, enabled: bool) -> None:
+        """设置是否允许 AgentB 操控选卡界面。
+
+        默认关闭：选卡场景**不触发 LLM**（玩家手动选卡）；开启后选卡界面喂 LLM 决策。
+        """
+        self._allow_seed_selection = bool(enabled)
+
     def is_actionable(self, state: GameState) -> bool:
         """该状态是否值得喂给 LLM 决策。
 
         - 战斗界面（in_battle）→ 可操作；
-        - 选卡界面（SELECT_CARD）→ 可操作（选卡让 LLM 决策 select_seeds）；
+        - 选卡界面（SELECT_CARD）→ 仅在 ``agent_controls_seed_selection=true`` 时可操作
+          （默认关：选卡不触发 LLM，由玩家手动选卡）；
         - 主菜单 / 结算 / 未知界面 → 不可操作（不喂 LLM，只轮询等待，循环不停不暂停）。
         """
         if state.in_battle:
             return True
+        if not self._allow_seed_selection:
+            return False
         return getattr(state, "game_ui", 0) == self._GAME_UI_SELECT_CARD
 
     # ------------------------------------------------------------------ #
@@ -322,6 +334,9 @@ class MemoryGameEngine:
         同一选卡会话内选过一次后不再允许（防止模型反复 select_seeds 出问题），
         进入下一关/生存模式下一轮的选卡界面时才重置。
         """
+        if not self._allow_seed_selection:
+            return {"action": "select_seeds", "status": "error",
+                    "error": "选卡由玩家手动控制（agent_controls_seed_selection=false），AgentB 不操控选卡"}
         if self._seeds_selected:
             return {"action": "select_seeds", "status": "error",
                     "error": "本关已完成选卡，不能重复选卡；等待下一关/下一轮选卡界面再选"}

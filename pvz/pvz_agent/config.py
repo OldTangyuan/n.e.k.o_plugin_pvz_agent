@@ -210,6 +210,9 @@ class AppConfig:
     # 运行模式："vision"=OpenCV 视觉方案（默认）；"text"=纯文本内存方案（读 pvz_memory，
     # 不用视觉模型/OpenCV，决策喂内存状态文本，动作走内存注入执行）。
     mode: str = "text"
+    # 是否允许 AgentB 操控选卡界面（默认关：选卡场景不触发 LLM，由玩家手动选卡；
+    # 开启后选卡界面喂 LLM，让模型用 select_seeds 决策）。
+    agent_controls_seed_selection: bool = False
     # 工具调用模式："regex"=简化正则提取（默认，模型输出 <tool_call>JSON，参考 LLM_PvZ_Player
     #   parser，不依赖原生函数调用）；"fc"=OpenAI 原生 function calling。
     tool_call_mode: str = "fc"
@@ -422,6 +425,7 @@ def load_config() -> AppConfig:
 
     app = AppConfig(
         mode=_mode,
+        agent_controls_seed_selection=bool(jcfg.get("agent_controls_seed_selection", False)),
         tool_call_mode=_tool_call_mode,
         vlm=vlm,
         text_vlm=text_vlm,

@@ -20,7 +20,13 @@
 from __future__ import annotations
 
 import os
+from pathlib import Path
 from typing import Any, Mapping
+
+try:
+    import tomllib  # Python 3.11+
+except ImportError:  # Python 3.10 及以下
+    import tomli as tomllib  # type: ignore[no-redef]
 
 from plugin.sdk.plugin import (
     Err,
@@ -69,8 +75,11 @@ class PVZAgentPlugin(NekoPluginBase):
     # ------------------------------------------------------------------ #
     @lifecycle(id="startup")
     async def startup(self, **_: Any):
-        cfg = _as_mapping(await self.config.dump(timeout=5.0))
-        self._cfg = _as_mapping(cfg.get("pvz_agent", {}))
+        self._cfg = self._read_own_plugin_config()
+        # 若直接读不到（如插件目录无 plugin.toml），回退宿主 SDK 配置
+        if not self._cfg:
+            cfg = _as_mapping(await self.config.dump(timeout=5.0))
+            self._cfg = _as_mapping(cfg.get("pvz_agent", {}))
         self._service.configure(self._cfg)
         preflight = self._service.probe()
         self.logger.info("[pvz_agent] 自检: %s", preflight)
@@ -86,6 +95,22 @@ class PVZAgentPlugin(NekoPluginBase):
         if bool(self._cfg.get("auto_start", False)):
             status["autostart"] = self._service.start()
         return Ok(status)
+
+    def _read_own_plugin_config(self) -> dict:
+        """直接读插件自带 plugin.toml 的 [pvz_agent] 段。
+
+        宿主的 ``config.dump()`` 返回的是首次运行后复制到宿主 state 目录的 runtime 配置，
+        改源码里的 plugin.toml 不会生效。这里**直接读插件目录的 plugin.toml**，
+        让编辑配置即时生效（重启后）；读取失败回退空 dict（由调用方走 SDK 配置）。
+        """
+        try:
+            path = Path(__file__).resolve().parent / "plugin.toml"
+            data = tomllib.loads(path.read_text(encoding="utf-8"))
+            section = data.get("pvz_agent", {})
+            return dict(section) if isinstance(section, dict) else {}
+        except Exception as exc:
+            self.logger.warning("[pvz_agent] 读取自带 plugin.toml 失败: %s", exc)
+            return {}
 
     @lifecycle(id="shutdown")
     async def shutdown(self, **_: Any):

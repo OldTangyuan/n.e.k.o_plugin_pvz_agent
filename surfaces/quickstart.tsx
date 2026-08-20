@@ -43,6 +43,7 @@ type StatusState = {
   goal: string
   error: string
   notRunning: boolean
+  envPath: string
 }
 
 // 解包 hosted-surface action 返回的 envelope（{plugin_id, action_id, result}）。
@@ -65,6 +66,7 @@ export default function PvZAgentQuickstart(props: PluginSurfaceProps) {
     goal: "",
     error: "",
     notRunning: false,
+    envPath: "",
   })
   const refreshingRef = useRef(false)
   const unmountedRef = useRef(false)
@@ -80,6 +82,7 @@ export default function PvZAgentQuickstart(props: PluginSurfaceProps) {
       if (unmountedRef.current) return
       const data = unwrapActionResult(envelope)
       const win = data.window && typeof data.window === "object" ? data.window : {}
+      const cfgPaths = data.config_paths && typeof data.config_paths === "object" ? data.config_paths : {}
       setState({
         loading: false,
         phase: String(data.phase || ""),
@@ -90,6 +93,7 @@ export default function PvZAgentQuickstart(props: PluginSurfaceProps) {
         goal: String(data.goal || ""),
         error: "",
         notRunning: false,
+        envPath: String(cfgPaths.env || ""),
       })
     } catch (exc: any) {
       if (unmountedRef.current) return
@@ -153,24 +157,36 @@ export default function PvZAgentQuickstart(props: PluginSurfaceProps) {
       <Card title="怎么开始">
         <Steps>
           <Step index="1" title="打开游戏">
-            启动《植物大战僵尸》**原版**（当前推荐；纯文本内存方案支持原版等受支持版本，
-            **杂交版正在适配中**）。插件会按 window_titles 里的精确标题轮询查找游戏窗口；
-            标题不符时，把窗口的精确标题写进插件配置或 pvz/config.json 的 window_titles（保存即生效）。
+            启动《植物大战僵尸》**原版 1.0.0.1051**（**最稳定**；其它受支持版本可玩但读内存
+            可能不稳，**杂交版正在适配中**）。插件会按 window_titles 里的精确标题轮询查找游戏
+            窗口；标题不符时把窗口精确标题写进 pvz/config.json 的 window_titles。
           </Step>
           <Step index="2" title="配置 AI 决策">
-            在插件目录 pvz/.env 填入 AI 服务地址与密钥（复制 pvz/.env.example 为 pvz/.env
-            后填写）。**纯文本模式填 TEXT_VLM_MODEL**（可只填这一个，URL/密钥复用 VLM_*）；
-            视觉模式填 VLM_MODEL。不配置的话猫娘无法自主决策，游玩无法开始。
+            把插件目录 pvz/.env.example 复制为 **pvz/.env**（路径见上方「配置文件位置」卡片），
+            填入 AI 服务地址与密钥。**纯文本模式填 TEXT_VLM_MODEL**（可只填这一个，URL/密钥
+            复用 VLM_*）；视觉模式填 VLM_MODEL。不配置则无法自主决策。
           </Step>
           <Step index="3" title="（纯文本模式）管理员运行">
             读内存 + 代码注入需要**以管理员身份**运行宿主，否则会提示“内存连接失败”。
           </Step>
-          <Step index="4" title="对猫娘说一句">
-            在对话里说“去玩植物大战僵尸吧”，或直接点上面的「开始游玩」。
-            之后猫娘会周期性看游戏画面，主动告诉你她接下来的操作，并自己打下去。
+          <Step index="4" title="手动选卡后开始">
+            默认**选卡由你手动操作**（agent_controls_seed_selection=false，选卡不触发 LLM）：
+            在游戏里选好卡进入战斗后，对猫娘说“去玩植物大战僵尸吧”，或点上面的「开始游玩」。
+            （想让猫娘自动选卡，把该配置改为 true 并重启。）
           </Step>
         </Steps>
       </Card>
+
+      {state.envPath ? (
+        <Card title="配置文件位置（.env 在这里）">
+          <Text>把 `pvz/.env.example` 复制为下面的文件并填写 AI 密钥/模型：</Text>
+          <Text>{state.envPath}</Text>
+          <Text>
+            其它配置：`plugin.toml` 的 [pvz_agent] 段（插件开关）、`pvz/config.json`
+            （核心行为/布局）。改完保存后**重启插件**生效。
+          </Text>
+        </Card>
+      ) : null}
 
       <Card title="她会怎么做">
         <Text>
@@ -207,6 +223,7 @@ export default function PvZAgentQuickstart(props: PluginSurfaceProps) {
         <KeyValue
           items={[
             { key: "mode", label: "运行模式", value: '"text"=纯文本内存(默认) / "vision"=视觉' },
+            { key: "agent_controls_seed_selection", label: "AgentB 操控选卡", value: "false(默认，手动选卡)" },
             { key: "tool_call_mode", label: "工具调用", value: '"fc"=原生函数调用 / "regex"=简化正则' },
             { key: "screenshot_feed_enabled", label: "被动推画面", value: "true（8 秒，画面变了才推）" },
             { key: "screenshot_nudge_enabled", label: "主动催猫娘行动", value: "true（5 秒）" },

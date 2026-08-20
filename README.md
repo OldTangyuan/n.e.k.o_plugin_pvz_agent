@@ -85,6 +85,7 @@
 |---|---|---|
 | `auto_start` | false | 插件启动时是否自动开始游玩 |
 | `mode` | "text" | 运行模式：`"text"`=纯文本内存方案（**当前默认，读内存+注入**）；`"vision"`=OpenCV 视觉方案（见下方「两种模式」） |
+| `agent_controls_seed_selection` | false | 是否允许 AgentB 操控选卡界面：`false`=选卡场景不触发 LLM（你手动选卡）；`true`=选卡界面喂 LLM 自动选卡 |
 | `tool_call_mode` | "fc" | 工具调用模式：`"fc"`=OpenAI 原生 function calling；`"regex"`=简化正则（模型输出 `<tool_call>JSON`，正则提取，参考 LLM_PvZ_Player parser，兼容更多模型） |
 | `window_titles` | 见文件 | 游戏窗口的精确标题（精确匹配，会轮询等待；兼容旧键 `window_title_keywords`） |
 | `screenshot_feed_enabled` | true | 被动推画面：周期把最新截图推进猫娘视野 |
@@ -99,6 +100,18 @@
 | `scan_grid_enabled` / `scan_cards_enabled` | true | 战局扫描开关（辅助决策） |
 | `notify_on_terminate` | true | 本关结束时推送通报 |
 | `notify_window_lost` | true | 游戏窗口丢失时推送通报并停止 |
+
+### 配置文件在哪里（三处，各管各的）
+
+| 文件 | 位置 | 管什么 |
+|---|---|---|
+| **`.env`** | 插件目录下的 `pvz/.env`（把 `pvz/.env.example` 复制改名） | **AI 密钥/模型**：`TEXT_VLM_*`（纯文本模式）、`VLM_*`（视觉模式） |
+| **`plugin.toml`** | 插件目录 `plugin.toml` → `[pvz_agent]` 段 | **插件开关**：`mode` / `tool_call_mode` / `agent_controls_seed_selection` / 截图推送 / 通知等 |
+| **`pvz/config.json`** | 插件目录 `pvz/config.json` | **核心行为/布局**：`text_vlm` 段（思考/上下文）、窗口标题、布局坐标等 |
+
+> 插件面板「快速开始」页会直接显示 `.env` 的**绝对路径**，照着去那个文件夹放文件即可。
+> 改配置后**重启插件**生效。⚠️ 插件**直接读自带 `plugin.toml`**（不走宿主 runtime 副本），
+> 所以改 `plugin.toml` 是即时生效的——不要改宿主安装目录里的同名副本。
 
 **配置边界**：AI 服务密钥在 `pvz/.env`（单来源）。校准数值（布局坐标、OpenCV 阈值）在
 `pvz/config.json`，一般不需要动；只有画面点击位置明显偏了才需要按下文校准。
@@ -119,6 +132,11 @@
 > **纯文本模式已经可以用了**：`mode="text"` 下插件**不加载任何视觉模型 / OpenCV**，一切
 > 状态与触发都来自 `pvz_memory` 读内存 + 代码注入；但**仍照常把游戏截图推给猫娘**，方便她
 > 看画面指挥。唯一前提：以**管理员身份**运行宿主 + 用受支持版本（**建议原版**）。
+
+> 🎯 **版本稳定性**：**`pvz 1.0.0.1051 EN`（原版）最稳定**——读内存、注入、铲除/选卡全部支持
+> 且经充分验证。**其它受支持版本可玩**（8 个版本都能读内存 + 基础注入），但**读内存方案可能
+> 不稳定**（部分偏移表标注"需实测"，地址错可能崩游戏）；**杂交版正在适配中**，尚未支持读内存。
+> 建议**用原版 1.0.0.1051 跑纯文本模式**。
 
 #### 纯文本模式的独立模型配置
 

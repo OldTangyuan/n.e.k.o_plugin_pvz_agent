@@ -137,6 +137,7 @@ class PvZAgentService:
 
         # 插件级配置（configure 填充）
         self._mode = "text"                      # "vision"=OpenCV 视觉方案 / "text"=纯文本内存方案
+        self._agent_selects_seeds = False        # 是否允许 AgentB 操控选卡（默认关）
         self._tool_call_mode = "fc"             # "regex"=简化正则 / "fc"=原生函数调用
         self._window_titles: list[str] = list(DEFAULT_WINDOW_TITLES)
         self._window_poll_interval: float = 1.0   # 等待窗口时的轮询间隔（秒）
@@ -197,6 +198,8 @@ class PvZAgentService:
             # 运行模式："vision" / "text"（非法值回退 "vision"）
             _mode = str(plugin_cfg.get("mode", "vision") or "vision").strip().lower()
             self._mode = _mode if _mode in ("vision", "text") else "vision"
+            # 是否允许 AgentB 操控选卡界面（默认关）
+            self._agent_selects_seeds = bool(plugin_cfg.get("agent_controls_seed_selection", False))
             # 工具调用模式："regex" / "fc"（非法回退 "regex"）
             _tcm = str(plugin_cfg.get("tool_call_mode", "regex") or "regex").strip().lower()
             self._tool_call_mode = _tcm if _tcm in ("regex", "fc") else "regex"
@@ -411,6 +414,7 @@ class PvZAgentService:
         直接指向 ``MemoryGameEngine``（接口与 ``Executor`` 对齐）。
         """
         engine = self._ensure_memory()  # 内存引擎（_ensure_memory 幂等，同时写 self._memory_engine）
+        engine.set_seed_selection_enabled(self._agent_selects_seeds)  # 选卡是否交给 AgentB
         self._executor = engine  # 内存引擎即执行器（接口与 Executor 对齐）
         engine.start_force_run()   # 失焦不暂停：看门狗清 game_paused
         self._vlm = core.vlm.VLMClient(cfg.text_vlm)  # 纯文本模式用独立模型配置（可不同模型+思考模式）
@@ -529,6 +533,12 @@ class PvZAgentService:
             "ready": self._runtime_ready(),
             "window": {"found": window_found, "title": window_title},
             "memory": self._memory_status(),
+            "config_paths": {
+                # 配置文件绝对路径，方便用户直接去对应文件夹编辑
+                "env": str(CORE_DIR / ".env"),
+                "plugin_toml": str(Path(__file__).resolve().parent / "plugin.toml"),
+                "core_config": str(CORE_DIR / "config.json"),
+            },
             "feed": {"enabled": feed_enabled, "last_push_at": last_feed_at},
             "steps": step_count,
             "last_action_at": last_action_at,
