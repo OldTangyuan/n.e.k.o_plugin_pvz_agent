@@ -16,5 +16,5 @@ build/
 store.db
 
 # 密钥、截图与系统文件（禁止提交；pvz/.gitignore 另有插件级补充）
-
+.env
 .DS_Store
