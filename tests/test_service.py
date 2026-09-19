@@ -148,6 +148,109 @@ def test_read_window_titles_merges_plugin_and_config_json(tmp_path) -> None:
 
 
 # --------------------------------------------------------------------------- #
+#  window：窗口匹配规则（关键词模糊匹配 + PvZ 引擎窗口类 MainWindow 兜底）
+# --------------------------------------------------------------------------- #
+class _FakeHandle:
+    def __init__(self, hwnd: int, title: str) -> None:
+        self.hwnd = hwnd
+        self.title = title
+
+
+def _find_with(title: str, class_name: str, titles: list[str], visible: bool = True):
+    """在 mock 的 win32 环境下运行 find_target_windows（只回报一个窗口）。"""
+    from pvz_agent import window as window_mod
+
+    def fake_enum(callback, ctx):
+        callback(0x1234, ctx)
+        return True
+
+    with mock.patch("win32gui.EnumWindows", side_effect=fake_enum), \
+         mock.patch("win32gui.IsWindowVisible", return_value=visible), \
+         mock.patch("win32gui.GetWindowText", return_value=title), \
+         mock.patch("win32gui.GetClassName", return_value=class_name):
+        return window_mod.find_target_windows(titles)
+
+
+def test_find_target_windows_matches_exact_title() -> None:
+    handles = _find_with("Plants vs. Zombies", "MainWindow", ["plants vs. zombies"])
+    assert len(handles) == 1
+    assert handles[0].title == "Plants vs. Zombies"
+
+
+def test_find_target_windows_matches_by_keyword_substring() -> None:
+    """模糊匹配：配置"植物大战僵尸"即可命中"植物大战僵尸杂交版"等带后缀标题。"""
+    handles = _find_with("植物大战僵尸杂交版", "MainWindow", ["pvz", "杂交版"])
+    assert len(handles) == 1
+    assert handles[0].title == "植物大战僵尸杂交版"
+    # 即便类名不是 MainWindow（如记事本打开的攻略文件），关键词命中也算匹配——
+    # 误选由面板「游戏窗口」手动切换兜底。
+    handles = _find_with("植物大战僵尸 修改器.txt - 记事本", "Notepad", ["植物大战僵尸"])
+    assert len(handles) == 1
+
+
+def test_find_target_windows_matches_pvz_window_class_with_any_title() -> None:
+    """类名通道：标题完全改名但类名 MainWindow 的 PvZ 引擎窗口也能兜底命中。"""
+    handles = _find_with("某个完全改名的版本", "MainWindow", ["pvz", "杂交版"])
+    assert len(handles) == 1
+
+
+def test_find_target_windows_rejects_excluded_and_foreign_windows() -> None:
+    # 资源管理器窗口被排除规则拦下（即便标题/类名撞上也一样）
+    assert _find_with("文件资源管理器", "MainWindow", ["pvz"]) == []
+    # 隐形窗口（IsWindowVisible=False）不参与匹配
+    assert _find_with("pvz", "MainWindow", ["pvz"], visible=False) == []
+    # 空标题的 MainWindow 窗口不命中（类名通道要求标题非空）
+    assert _find_with("", "MainWindow", ["pvz"]) == []
+
+
+def test_get_status_reports_window_list_with_live_fallback() -> None:
+    """未绑定窗口时 get_status 回退用第一个匹配；windows 列出全部匹配项。"""
+    svc = _make_service()
+    status = svc.get_status()
+    assert status["window"]["found"] is False
+    assert status["windows"] == []
+    with mock.patch.object(
+        svc,
+        "_live_windows",
+        return_value=[_FakeHandle(111, "植物大战僵尸杂交版"), _FakeHandle(222, "pvz")],
+    ):
+        status = svc.get_status()
+    assert status["window"]["found"] is True
+    assert status["window"]["title"] == "植物大战僵尸杂交版"
+    assert status["window"]["hwnd"] == 111
+    assert status["windows"] == [
+        {"hwnd": 111, "title": "植物大战僵尸杂交版"},
+        {"hwnd": 222, "title": "pvz"},
+    ]
+
+
+def test_select_window_binds_chosen_handle() -> None:
+    """手动选择：绑定指定句柄并重建截图器，get_status 回显选中窗口。"""
+    svc = _make_service()
+    win_a, win_b = _FakeHandle(111, "植物大战僵尸杂交版"), _FakeHandle(222, "pvz")
+    with mock.patch.object(svc, "_live_windows", return_value=[win_a, win_b]):
+        result = svc.select_window(222)
+    assert result["status"] == "ok"
+    assert "pvz" in result["summary"]
+    assert svc._win is win_b
+    assert svc._capturer is not None and svc._capturer.win is win_b
+    assert result["window"]["hwnd"] == 222
+    assert result["window"]["title"] == "pvz"
+
+
+def test_select_window_rejects_unknown_or_bad_hwnd() -> None:
+    svc = _make_service()
+    with mock.patch.object(svc, "_live_windows", return_value=[_FakeHandle(111, "植物大战僵尸杂交版")]):
+        result = svc.select_window(999)  # 不在匹配列表里
+        assert result["status"] == "error"
+        assert result["windows"] == [{"hwnd": 111, "title": "植物大战僵尸杂交版"}]
+        assert svc._win is None  # 失败时不改变当前绑定
+        result = svc.select_window("not-a-number")  # 非法 hwnd 也走错误路径
+        assert result["status"] == "error"
+        assert svc._win is None
+
+
+# --------------------------------------------------------------------------- #
 #  service：纯文本模式（mode="text"）
 # --------------------------------------------------------------------------- #
 def test_configure_mode_text_and_invalid_fallback() -> None:

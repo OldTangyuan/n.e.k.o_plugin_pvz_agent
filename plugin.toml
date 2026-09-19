@@ -41,11 +41,14 @@ agent_controls_seed_selection = false
 #   "fc"    = OpenAI 原生 function calling（tools 参数）。
 tool_call_mode = "fc"
 
-# 游戏窗口的精确标题（精确匹配，不再做子串关键词匹配；cmd/资源管理器/终端等已被核心自动排除）。
+# 游戏窗口标题关键词（模糊匹配：窗口标题包含任一关键词即命中；另按 PopCap 引擎
+# 窗口类 MainWindow 兜底识别。cmd/资源管理器/终端等已被核心自动排除）。
+# 多个匹配窗口时默认用第一个；面板「游戏窗口」卡片会列出全部匹配项，可手动切换。
 # 获取窗口时会轮询本配置 + pvz/config.json 的 window_titles，改完保存即生效、无需重启。
 window_titles = [
   "plant vs zombie", "植物大战僵尸", "pvz", "杂交版",
   "plants vs. zombies", "plants vs zombies", "植物大战僵尸中文版",
+  "植物大战僵尸杂交版", "Plants vs. Zombies GOTY",
 ]
 
 # ── 猫娘观察通道（周期推送纯截图，猫娘是玩家）──

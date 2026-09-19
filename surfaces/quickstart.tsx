@@ -39,6 +39,9 @@ type StatusState = {
   ready: boolean
   windowFound: boolean
   windowTitle: string
+  windowHwnd: number | null
+  windows: { hwnd: number; title: string }[]
+  selectingHwnd: number | null
   steps: number
   goal: string
   error: string
@@ -62,6 +65,9 @@ export default function PvZAgentQuickstart(props: PluginSurfaceProps) {
     ready: false,
     windowFound: false,
     windowTitle: "",
+    windowHwnd: null,
+    windows: [],
+    selectingHwnd: null,
     steps: 0,
     goal: "",
     error: "",
@@ -69,6 +75,7 @@ export default function PvZAgentQuickstart(props: PluginSurfaceProps) {
     envPath: "",
   })
   const refreshingRef = useRef(false)
+  const selectingRef = useRef(false)
   const unmountedRef = useRef(false)
 
   const refresh = async () => {
@@ -82,6 +89,9 @@ export default function PvZAgentQuickstart(props: PluginSurfaceProps) {
       if (unmountedRef.current) return
       const data = unwrapActionResult(envelope)
       const win = data.window && typeof data.window === "object" ? data.window : {}
+      const windows = (Array.isArray(data.windows) ? data.windows : [])
+        .filter((w: any) => w && typeof w === "object")
+        .map((w: any) => ({ hwnd: Number(w.hwnd), title: String(w.title || "") }))
       const cfgPaths = data.config_paths && typeof data.config_paths === "object" ? data.config_paths : {}
       setState({
         loading: false,
@@ -89,6 +99,9 @@ export default function PvZAgentQuickstart(props: PluginSurfaceProps) {
         ready: Boolean(data.ready),
         windowFound: Boolean(win.found),
         windowTitle: String(win.title || ""),
+        windowHwnd: win.hwnd == null ? null : Number(win.hwnd),
+        windows,
+        selectingHwnd: null,
         steps: Number(data.steps || 0),
         goal: String(data.goal || ""),
         error: "",
@@ -118,6 +131,21 @@ export default function PvZAgentQuickstart(props: PluginSurfaceProps) {
       window.clearInterval(timer)
     }
   }, [])
+
+  // 手动切换游玩目标窗口（pvz_select_window：hwnd 取状态 windows 列表里的句柄）。
+  const selectWindow = async (hwnd: number) => {
+    if (selectingRef.current || unmountedRef.current) return
+    selectingRef.current = true
+    setState((prev) => ({ ...prev, selectingHwnd: hwnd }))
+    try {
+      await props.api.call("pvz_select_window", { hwnd })
+    } catch {
+      // 失败不打断：随后的 refresh 会带回最新状态/错误。
+    } finally {
+      selectingRef.current = false
+      if (!unmountedRef.current) await refresh()
+    }
+  }
 
   const phaseTone: Tone =
     state.phase === "running" ? "success" : state.phase === "paused" ? "warning" : "default"
@@ -154,22 +182,47 @@ export default function PvZAgentQuickstart(props: PluginSurfaceProps) {
         </Stack>
       </Card>
 
+      <Card title="游戏窗口（多个匹配时默认用第一个，可切换）">
+        {state.windows.length === 0 ? (
+          <Text>
+            未找到匹配的游戏窗口。启动游戏后点「刷新」，这里会自动列出所有匹配窗口。
+          </Text>
+        ) : (
+          <Stack>
+            {state.windows.map((w) => {
+              const active = state.windowHwnd === w.hwnd
+              return (
+                <Stack key={`win-${w.hwnd}`}>
+                  <Text>
+                    {active ? "✔ 当前使用：" : ""}
+                    {w.title}（句柄 {w.hwnd}）
+                  </Text>
+                  {active ? null : (
+                    <Button onClick={() => selectWindow(w.hwnd)}>
+                      {state.selectingHwnd === w.hwnd ? "切换中…" : "使用此窗口"}
+                    </Button>
+                  )}
+                </Stack>
+              )
+            })}
+          </Stack>
+        )}
+      </Card>
+
       <Card title="怎么开始">
         <Steps>
           <Step index="1" title="打开游戏">
-            启动《植物大战僵尸》**原版 1.0.0.1051**（**最稳定**；其它受支持版本可玩但读内存
-            可能不稳，**杂交版正在适配中**）。插件会按 window_titles 里的精确标题轮询查找游戏
-            窗口；标题不符时把窗口精确标题写进 pvz/config.json 的 window_titles。
+            启动《植物大战僵尸》。插件会按 window_titles 关键词自动识别游戏窗口
+            （关键词模糊匹配 + PopCap 引擎窗口类兜底）；多个匹配时**默认用第一个**，
+            也可在上方「游戏窗口」卡片里手动切换。标题特殊时把关键词加进
+            pvz/config.json 的 window_titles（保存即生效）。
           </Step>
           <Step index="2" title="配置 AI 决策">
-            把插件目录 pvz/.env.example 复制为 **pvz/.env**（路径见上方「配置文件位置」卡片），
+            把插件目录 pvz/.env.example 复制为 **pvz/.env**（路径见下方「配置文件位置」卡片），
             填入 AI 服务地址与密钥。**纯文本模式填 TEXT_VLM_MODEL**（可只填这一个，URL/密钥
             复用 VLM_*）；视觉模式填 VLM_MODEL。不配置则无法自主决策。
           </Step>
-          <Step index="3" title="（纯文本模式）管理员运行">
-            读内存 + 代码注入需要**以管理员身份**运行宿主，否则会提示“内存连接失败”。
-          </Step>
-          <Step index="4" title="手动选卡后开始">
+          <Step index="3" title="手动选卡后开始">
             默认**选卡由你手动操作**（agent_controls_seed_selection=false，选卡不触发 LLM）：
             在游戏里选好卡进入战斗后，对猫娘说“去玩植物大战僵尸吧”，或点上面的「开始游玩」。
             （想让猫娘自动选卡，把该配置改为 true 并重启。）
@@ -202,16 +255,16 @@ export default function PvZAgentQuickstart(props: PluginSurfaceProps) {
       <Card title="排障">
         <Steps>
           <Step index="1" title="状态一直显示“未找到窗口”">
-            确认游戏已打开、没最小化；窗口标题需与 window_titles 里的**精确标题**一致
-            （可在插件配置或 pvz/config.json 的 window_titles 里补充，保存即生效）。
+            确认游戏已打开；匹配到的窗口会列在上方「游戏窗口」卡片，可手动切换使用哪个。
+            若列表为空，把窗口标题里的关键词加进插件配置或 pvz/config.json 的
+            window_titles（保存即生效）。
           </Step>
           <Step index="2" title="AI 决策未就绪">
             说明还没配置 AI 决策：纯文本模式在 pvz/.env 填 TEXT_VLM_MODEL，视觉模式填
             VLM_MODEL，填好并重启插件。
           </Step>
           <Step index="3" title="纯文本模式提示“内存连接失败”">
-            ① 需以**管理员身份**运行宿主；② 确认游戏是**受支持版本**（建议原版，
-            杂交版正在适配中）。
+            确认游戏已启动且为受支持的版本；刚启动游戏的话稍等片刻重试，或重启插件。
           </Step>
           <Step index="4" title="点「开始游玩」没反应">
             先确认插件已在运行（列表页启动），再确认游戏窗口与 AI 决策都已就绪。
@@ -228,7 +281,7 @@ export default function PvZAgentQuickstart(props: PluginSurfaceProps) {
             { key: "screenshot_feed_enabled", label: "被动推画面", value: "true（8 秒，画面变了才推）" },
             { key: "screenshot_nudge_enabled", label: "主动催猫娘行动", value: "true（5 秒）" },
             { key: "sun_auto_collect", label: "自动收阳光", value: "true" },
-            { key: "window_titles", label: "窗口标题", value: "植物大战僵尸 / pvz / 杂交版" },
+            { key: "window_titles", label: "窗口标题", value: "植物大战僵尸 / Plants vs. Zombies 等关键词" },
           ]}
         />
       </Card>
@@ -244,7 +297,7 @@ export default function PvZAgentQuickstart(props: PluginSurfaceProps) {
         波次，用**纯文本 LLM** 决策（默认开启思考模式、更多上下文），动作走代码注入执行；
         但**仍照常把游戏截图推给猫娘**供她看画面指挥。
         特点：LLM 思考期间不冻结游戏、窗口失焦也不暂停、非战斗界面不喂 LLM 只轮询等待。
-        注意：需以**管理员身份**运行宿主 + **受支持版本**（建议原版；**杂交版正在适配中**）。
+        注意：使用受支持的游戏版本体验最佳。
       </Alert>
     </Page>
   )

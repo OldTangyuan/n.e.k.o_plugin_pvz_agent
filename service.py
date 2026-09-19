@@ -279,21 +279,12 @@ class PvZAgentService:
           窗口，直到命中或 ``timeout`` 超时 / ``cancel`` 被 set（返回时抛
           ``WindowNotFoundError``）。运行中改配置即可让新标题生效。
         - ``timeout``：秒；``None`` = 无限等待（配合 ``cancel`` 在后台线程使用）。
-        - 多个匹配窗口时自动取第一个（核心的 ``pick_single`` 是交互式 input()，
-          在插件进程里会挂起，不能复用）。
+        - 匹配按关键词模糊匹配 + PvZ 引擎窗口类（MainWindow）兜底；**多个匹配
+          窗口时默认取第一个**（核心的 ``pick_single`` 是交互式 input()，在插件
+          进程里会挂起，不能复用）——面板「游戏窗口」卡片可手动切换目标窗口。
         """
         if self._win is not None:
             return self._win
-        screenshot_dir = "screenshots"
-        try:
-            cfg_path = CORE_DIR / "config.json"
-            if cfg_path.is_file():
-                j = json.loads(cfg_path.read_text(encoding="utf-8"))
-                sd = j.get("agent", {}).get("screenshot_dir")
-                if isinstance(sd, str) and sd:
-                    screenshot_dir = sd
-        except Exception:
-            pass
 
         core = self._import_core()
         win = core.window.wait_for_window(
@@ -305,16 +296,63 @@ class PvZAgentService:
         )
         if win is None:
             raise core.window.WindowNotFoundError(
-                "未找到匹配的 PVZ 窗口（当前 window_titles 配置: "
+                "未找到匹配的 PVZ 窗口（关键词: "
                 + "/".join(self._read_window_titles()[:5])
-                + " 等；cmd/资源管理器/终端已被自动排除）。请确认游戏已启动，"
-                "或把窗口的精确标题写入配置（改完保存即生效）。"
+                + " 等）。请确认游戏已启动，或把窗口标题里的关键词写入配置"
+                "（改完保存即生效）；也可在面板「游戏窗口」卡片里手动选择。"
             )
         if len(core.window.find_target_windows(self._read_window_titles())) > 1:
             self._logger.info("找到多个匹配窗口，自动使用第一个: %s", win.title)
-        self._win = win
-        self._capturer = core.window.Capturer(win, screenshot_dir)
+        self._bind_window(win)
         return win
+
+    def _screenshot_dir(self) -> str:
+        """截图目录：读 pvz/config.json 的 agent.screenshot_dir（缺省 screenshots）。"""
+        screenshot_dir = "screenshots"
+        try:
+            cfg_path = CORE_DIR / "config.json"
+            if cfg_path.is_file():
+                j = json.loads(cfg_path.read_text(encoding="utf-8"))
+                sd = j.get("agent", {}).get("screenshot_dir")
+                if isinstance(sd, str) and sd:
+                    screenshot_dir = sd
+        except Exception:
+            pass
+        return screenshot_dir
+
+    def _bind_window(self, win: Any) -> None:
+        """绑定目标窗口并重建截图器（_ensure_window / select_window 共用）。"""
+        self._win = win
+        self._capturer = self._import_core().window.Capturer(win, self._screenshot_dir())
+
+    def select_window(self, hwnd: int) -> dict[str, Any]:
+        """手动选择游玩目标窗口（面板「游戏窗口」卡片切换用）。
+
+        只允许切换到当前实时匹配列表里的窗口；切换会同步重建截图器，游玩中
+        调用即热切换。返回 get_status 同款状态快照（外加 status/summary），
+        面板调完直接整体刷新。
+        """
+        handles = self._live_windows()
+        try:
+            hwnd_int = int(hwnd)
+        except (TypeError, ValueError):
+            hwnd_int = -1
+        target = next((h for h in handles if int(h.hwnd) == hwnd_int), None)
+        if target is None:
+            return {
+                "status": "error",
+                "summary": "该窗口已关闭或不再匹配，请刷新「游戏窗口」列表后重试。",
+                "windows": self._window_infos(handles),
+            }
+        self._bind_window(target)
+        self._logger.info(
+            "[pvz-agent] 手动切换目标窗口: %s (hwnd=%s)", target.title, target.hwnd
+        )
+        return {
+            "status": "ok",
+            "summary": f"已选择游戏窗口：{target.title}",
+            **self.get_status(),
+        }
 
     def _log_window_wait(self, attempt: int, titles: list[str]) -> None:
         """轮询未命中时打日志（只在开头与每 10 轮提示一次，避免刷屏）。"""
@@ -322,6 +360,24 @@ class PvZAgentService:
             self._logger.info("[pvz-agent] 未找到 PVZ 窗口，开始轮询（标题: %s）...", titles)
         elif attempt % 10 == 0:
             self._logger.info("[pvz-agent] 仍在等待 PVZ 窗口（第 %d 轮，标题: %s）...", attempt + 1, titles)
+
+    def _live_windows(self) -> list[Any]:
+        """只读实时探测：当前桌面上所有匹配的 PVZ 窗口（WindowHandle 列表）。
+
+        供 get_status（面板窗口列表/状态回显）与 select_window（手动切换目标
+        窗口）用。不绑定句柄、不建运行时，纯查询（EnumWindows 一次毫秒级）。
+        任何异常都吞掉返回空列表（非 Windows / 核心未导入等场景回退缓存行为）。
+        """
+        try:
+            core = self._import_core()
+            return list(core.window.find_target_windows(self._read_window_titles()))
+        except Exception:
+            return []
+
+    @staticmethod
+    def _window_infos(handles: list[Any]) -> list[dict[str, Any]]:
+        """WindowHandle 列表 → 可 JSON 序列化的 {hwnd, title} 列表。"""
+        return [{"hwnd": int(h.hwnd), "title": str(h.title)} for h in handles]
 
     def _ensure_runtime(
         self,
@@ -523,6 +579,15 @@ class PvZAgentService:
             last_feed_at = self._last_feed_at
             window_found = self._win is not None
             window_title = self._win.title if self._win is not None else ""
+            window_hwnd = self._win.hwnd if self._win is not None else None
+        # 实时枚举全部匹配窗口：未绑定时回退用第一个（默认行为）；windows 列表
+        # 供面板展示并手动切换（probe/开始游玩 才会写 self._win 缓存，游戏后开时
+        # 面板否则永远显示"未找到"）。
+        windows = self._window_infos(self._live_windows())
+        if not window_found and windows:
+            window_found = True
+            window_title = str(windows[0]["title"])
+            window_hwnd = int(windows[0]["hwnd"])
         return {
             "phase": phase,
             "mode": self._mode,
@@ -531,7 +596,12 @@ class PvZAgentService:
             "running": phase == self.PHASE_RUNNING,
             "paused": phase == self.PHASE_PAUSED,
             "ready": self._runtime_ready(),
-            "window": {"found": window_found, "title": window_title},
+            "window": {
+                "found": window_found,
+                "title": window_title,
+                "hwnd": window_hwnd,
+            },
+            "windows": windows,
             "memory": self._memory_status(),
             "config_paths": {
                 # 配置文件绝对路径，方便用户直接去对应文件夹编辑

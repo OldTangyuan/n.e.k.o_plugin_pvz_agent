@@ -369,6 +369,26 @@ class PVZAgentPlugin(NekoPluginBase):
     async def pvz_get_status(self, **_: Any):
         return await self._run_entry(lambda: self._neko.get_status())
 
+    @ui.action(id="pvz_select_window", label="选择游戏窗口")
+    @plugin_entry(
+        id="pvz_select_window",
+        name="选择游戏窗口",
+        description=(
+            "多个匹配的 PvZ 窗口时切换使用哪一个（hwnd 取状态里 windows 列表的句柄）。"
+        ),
+        llm_result_fields=["summary"],
+        input_schema={
+            "type": "object",
+            "properties": {
+                "hwnd": {"type": "integer", "description": "要使用的窗口句柄（windows 列表里的 hwnd）。"},
+            },
+            "required": ["hwnd"],
+        },
+        metadata={"agent_auto": False},
+    )
+    async def pvz_select_window(self, hwnd: int, **_: Any):
+        return await self._run_entry(lambda: self._neko.select_window(hwnd))
+
     @ui.action(id="pvz_start", label="开始游玩", tone="primary")
     @plugin_entry(
         id="pvz_start",

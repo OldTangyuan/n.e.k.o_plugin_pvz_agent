@@ -228,11 +228,13 @@ class AppConfig:
     grid_scan: GridScanConfig = field(default_factory=GridScanConfig)
     card_scan: CardScanConfig = field(default_factory=CardScanConfig)
     select_scan: SelectScanConfig = field(default_factory=SelectScanConfig)
-    # 窗口精确标题（精确匹配，不再做子串关键词匹配）。
+    # 窗口标题关键词（模糊匹配：标题包含任一关键词即命中）+ PvZ 引擎窗口类
+    # MainWindow 兜底；多匹配默认第一个，面板可手动切换。
     # 旧配置键 window_title_keywords 仍兼容读取。
     window_titles: list[str] = field(default_factory=lambda: [
         "plant vs zombie", "植物大战僵尸", "pvz",
         "杂交版", "plants vs. zombies", "plants vs zombies",
+        "植物大战僵尸中文版", "植物大战僵尸杂交版", "Plants vs. Zombies GOTY",
     ])
     save_capture: bool = False          # 是否每轮都存盘截图
 

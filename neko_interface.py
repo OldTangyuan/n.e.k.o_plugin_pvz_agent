@@ -92,6 +92,10 @@ class PvZNekoInterface:
     async def set_speed(self, speed: float) -> dict[str, Any]:
         return _normalize(self._service.set_speed(speed))
 
+    async def select_window(self, hwnd: Any) -> dict[str, Any]:
+        """手动选择游玩目标窗口（面板「游戏窗口」列表切换用）。"""
+        return _normalize(self._service.select_window(hwnd))
+
     # ------------------------------------------------------------------ #
     #  辅助
     # ------------------------------------------------------------------ #

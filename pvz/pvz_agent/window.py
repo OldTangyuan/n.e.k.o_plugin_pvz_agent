@@ -50,16 +50,46 @@ def _is_excluded(title: str, class_name: str) -> bool:
     return False
 
 
-def _is_exact_title(title: str, titles: list[str]) -> bool:
-    """精确标题匹配：窗口标题 strip 后与任一配置标题全等（忽略大小写）。
+def _is_keyword_title(title: str, titles: list[str]) -> bool:
+    """模糊标题匹配：窗口标题（casefold）包含任一配置关键词（casefold）。
 
-    不再做子串模糊匹配——模糊匹配容易误命中（如"植物大战僵尸"会命中
-    "植物大战僵尸 修改器.txt"），要求配置里写明窗口的精确标题。
+    保留关键词式匹配：配置里写"杂交版"即可命中"植物大战僵尸杂交版"。
+    可能的误命中（如记事本打开的攻略/修改器文件）由排除规则 + 面板
+    「游戏窗口」卡片手动选择兜底。
     """
     if not title:
         return False
     normalized = title.strip().casefold()
-    return any(normalized == t.strip().casefold() for t in titles if t)
+    return any(t.strip().casefold() in normalized for t in titles if t.strip())
+
+
+# PopCap PvZ 引擎（原版 / 年度版 / 中文版 / 杂交版）的窗口类名固定为 "MainWindow"。
+# vendored pvz_memory 也是按这个类名查找（见 pvz_memory/offsets.py 的 PVZ_WINDOW_CLASS，
+# 且其兜底逻辑"只按类名查找"早已验证了这条路是可靠的）。
+# 类名不会出现在记事本/资源管理器/浏览器/终端窗口上，所以不会重现"误命中
+# 植物大战僵尸 修改器.txt"的问题——那是标题子串匹配的锅，不是类名的。
+PVZ_WINDOW_CLASS_NAMES = ("MainWindow",)
+
+
+def _is_pvz_window_class(class_name: str) -> bool:
+    """是否为 PopCap PvZ 系引擎的窗口类名。"""
+    return bool(class_name) and class_name in PVZ_WINDOW_CLASS_NAMES
+
+
+def _matches(title: str, class_name: str, titles: list[str]) -> bool:
+    """窗口命中规则（先过排除规则，再任一通道命中）：
+
+    1. 关键词模糊匹配：标题包含任一 window_titles 词条（主通道，容忍标题
+       带后缀/改名，如"杂交版"→"植物大战僵尸杂交版"）；
+    2. 类名通道：窗口类名 == "MainWindow"（PopCap PvZ 引擎固定类名）且
+       标题非空——标题完全改名的版本也能兜底命中；
+    3. 命中多个时默认用第一个，插件面板「游戏窗口」卡片可手动切换。
+    """
+    if _is_excluded(title, class_name):
+        return False
+    return _is_keyword_title(title, titles) or (
+        bool(title) and _is_pvz_window_class(class_name)
+    )
 
 
 def _enum_callback(hwnd: int, ctx: dict) -> bool:
@@ -67,7 +97,7 @@ def _enum_callback(hwnd: int, ctx: dict) -> bool:
         return True
     title = win32gui.GetWindowText(hwnd)
     class_name = win32gui.GetClassName(hwnd)
-    if not _is_excluded(title, class_name) and _is_exact_title(title, ctx["titles"]):
+    if _matches(title, class_name, ctx["titles"]):
         ctx["hwnds"].append(hwnd)
     return True
 
