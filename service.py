@@ -42,6 +42,31 @@ VENDOR_DIR = CORE_DIR / "vendor"
 if str(VENDOR_DIR) not in sys.path:
     sys.path.insert(0, str(VENDOR_DIR))
 
+# ── 打包宿主兜底（同 cv2 的 vendor 思路）─────────────────────────────────
+# Steam 版宿主的内嵌 Python 环境依赖不全：pywin32 只留了 .pyd（缺 win32gui/
+# win32con/win32process）、PIL 只剩 6 个 .pyd（缺 __init__.py/Image.py，成为
+# 命名空间包）、pyautogui/pyperclip/openai 整体缺失（自检报 "No module named
+# 'win32gui'" → 窗口永远显示"未找到"）。内置副本放在
+# pvz/vendor/{pywin32,pyautogui_stack,pillow,openai_stack}/（同 CPython 3.11）。
+# 健康宿主下面这些探测直接命中，内置副本不参与导入（pyd 与解释器版本强相关，
+# 优先用宿主自带的）；缺失/残缺时才把对应目录挂到 sys.path 最前，并清掉残缺
+# 的命名空间包缓存，保证成套版本自洽（openai_stack 含配套 pydantic/pydantic_core）。
+for _fallback_pkg, _fallback_attr, _fallback_dir in (
+    ("win32gui", None, VENDOR_DIR / "pywin32"),
+    ("pyautogui", None, VENDOR_DIR / "pyautogui_stack"),
+    ("PIL", "Image", VENDOR_DIR / "pillow"),
+    ("openai", None, VENDOR_DIR / "openai_stack"),
+):
+    try:
+        _fallback_module = __import__(_fallback_pkg)
+        if _fallback_attr is not None and not hasattr(_fallback_module, _fallback_attr):
+            raise ImportError(f"{_fallback_pkg}.{_fallback_attr} missing (残缺的命名空间包)")
+    except Exception:  # ImportError / 命名空间残缺 / pyd 加载失败都走兜底
+        _fallback_path = str(_fallback_dir)
+        if _fallback_path not in sys.path:
+            sys.path.insert(0, _fallback_path)
+        sys.modules.pop(_fallback_pkg, None)  # 清掉残缺的命名空间包缓存
+
 DEFAULT_GOAL = "自动玩完当前这一关并尽可能取得胜利"
 
 # 防循环：同一动作 + 同坐标连续失败达到该次数则强制停止该轮并提示换策略。
