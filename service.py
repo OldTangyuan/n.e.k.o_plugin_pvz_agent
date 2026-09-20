@@ -23,8 +23,10 @@
 from __future__ import annotations
 
 import hashlib
+import importlib.util
 import io
 import json
+import os
 import sys
 import threading
 import time
@@ -48,32 +50,106 @@ if str(VENDOR_DIR) not in sys.path:
 # 命名空间包）、pyautogui/pyperclip/openai 整体缺失（自检报 "No module named
 # 'win32gui'" → 窗口永远显示"未找到"）。内置副本放在
 # pvz/vendor/{pywin32,pyautogui_stack,pillow,openai_stack}/（同 CPython 3.11）。
-# 健康宿主下面这些探测直接命中，内置副本不参与导入（pyd 与解释器版本强相关，
-# 优先用宿主自带的）；缺失/残缺时才把对应目录挂到 sys.path 最前，并清掉残缺
-# 的命名空间包缓存，保证成套版本自洽（openai_stack 含配套 pydantic/pydantic_core）。
-_VENDOR_BOOTSTRAP_TRACE: list[str] = []  # 诊断：兜底探测轨迹（导入失败时随日志输出）
+#
+# 机制：探测宿主自带库可用 → 什么都不做（pyd 与解释器版本强相关，健康宿主
+# 永远优先用自带的）；缺失/残缺 → 用 importlib spec 按"绝对路径"把内置副本
+# 逐个注册进 sys.modules。import 系统永远先查 sys.modules，之后插件任何位置
+# 的 `import xxx` 都会直接命中内置副本——不依赖 sys.path 的查找顺序，宿主
+# 如何重排/清理导入路径都不影响（v0.2.7 的 sys.path 挂载方案在真实宿主中
+# 未生效，本版改为 sys.modules 预注册）。注册顺序严格按依赖树，先依赖后使用。
+_VENDOR_BOOTSTRAP_TRACE: list[str] = []  # 诊断：兜底轨迹（核心导入失败时随日志输出）
 
-for _fallback_pkg, _fallback_attr, _fallback_dir in (
-    ("win32gui", None, VENDOR_DIR / "pywin32"),
-    ("pyautogui", None, VENDOR_DIR / "pyautogui_stack"),
-    ("PIL", "Image", VENDOR_DIR / "pillow"),
-    ("openai", None, VENDOR_DIR / "openai_stack"),
-):
+
+def _vendor_probe(pkg: str, attr: str | None = None) -> bool:
+    """宿主自带库是否真实可用（能导入且属性齐全；命名空间残缺包视为不可用）。"""
     try:
-        _fallback_module = __import__(_fallback_pkg)
-        if _fallback_attr is not None and not hasattr(_fallback_module, _fallback_attr):
-            raise ImportError(f"{_fallback_pkg}.{_fallback_attr} missing (残缺的命名空间包)")
-        _VENDOR_BOOTSTRAP_TRACE.append(
-            f"{_fallback_pkg}: 宿主自带可导入, 未挂载 (module={getattr(_fallback_module, '__file__', None)})"
+        mod = __import__(pkg)
+    except Exception:
+        return False
+    if attr is not None and not hasattr(mod, attr):
+        return False
+    return True
+
+
+def _vendor_spec_load(mod_name: str, path: str, pkg_dir: str | None = None) -> None:
+    """按绝对路径加载模块/包并注册进 sys.modules（幂等；失败仅记录不抛出）。"""
+    if mod_name in sys.modules:
+        return
+    try:
+        spec = importlib.util.spec_from_file_location(
+            mod_name, path, submodule_search_locations=([pkg_dir] if pkg_dir else None)
         )
-    except Exception as _fallback_exc:  # ImportError / 命名空间残缺 / pyd 加载失败都走兜底
-        _fallback_path = str(_fallback_dir)
-        if _fallback_path not in sys.path:
-            sys.path.insert(0, _fallback_path)
-        sys.modules.pop(_fallback_pkg, None)  # 清掉残缺的命名空间包缓存
-        _VENDOR_BOOTSTRAP_TRACE.append(
-            f"{_fallback_pkg}: 兜底挂载 {_fallback_path} (原因: {_fallback_exc!r})"
-        )
+        if spec is None or spec.loader is None:
+            _VENDOR_BOOTSTRAP_TRACE.append(f"{mod_name}: spec 不可用, 跳过 ({path})")
+            return
+        mod = importlib.util.module_from_spec(spec)
+        sys.modules[mod_name] = mod
+        spec.loader.exec_module(mod)
+        _VENDOR_BOOTSTRAP_TRACE.append(f"{mod_name}: 兜底加载 OK ({path})")
+    except Exception as exc:  # pyd 版本不符等 → 留给原生 import 报真实错误
+        sys.modules.pop(mod_name, None)
+        _VENDOR_BOOTSTRAP_TRACE.append(f"{mod_name}: 兜底加载失败 ({exc!r})")
+
+
+def _vendor_pkg_dir(group: str, name: str) -> tuple[str, str]:
+    """返回 (包 __init__.py 路径, 包目录)。"""
+    d = str(VENDOR_DIR / group / name)
+    return os.path.join(d, "__init__.py"), d
+
+
+# 1) pywin32 三件套（win32api/pywintypes 仍用宿主自带副本）
+if not _vendor_probe("win32gui"):
+    _pywin = str(VENDOR_DIR / "pywin32")
+    _vendor_spec_load("win32con", os.path.join(_pywin, "win32con.py"))
+    _vendor_spec_load("win32process", os.path.join(_pywin, "win32process.pyd"))
+    _vendor_spec_load("win32gui", os.path.join(_pywin, "win32gui.pyd"))
+else:
+    _VENDOR_BOOTSTRAP_TRACE.append("win32gui: 宿主自带, 未兜底")
+
+# 2) PIL（Steam 版宿主的 PIL 是只剩 .pyd 的残缺命名空间包）
+if not _vendor_probe("PIL", "Image"):
+    _init, _dir = _vendor_pkg_dir("pillow", "PIL")
+    _vendor_spec_load("PIL", _init, _dir)
+else:
+    _VENDOR_BOOTSTRAP_TRACE.append("PIL: 宿主自带, 未兜底")
+
+# 3) pyautogui 执行栈（依赖序：先依赖后使用；pyrect 是 pygetwindow 的依赖）
+if not _vendor_probe("pyautogui"):
+    for _pkg in ("pytweening", "pymsgbox", "pyrect", "pyperclip", "mouseinfo", "pygetwindow", "pyscreeze"):
+        if not _vendor_probe(_pkg):
+            _init, _dir = _vendor_pkg_dir("pyautogui_stack", _pkg)
+            _vendor_spec_load(_pkg, _init, _dir)
+    _init, _dir = _vendor_pkg_dir("pyautogui_stack", "pyautogui")
+    _vendor_spec_load("pyautogui", _init, _dir)
+else:
+    _VENDOR_BOOTSTRAP_TRACE.append("pyautogui: 宿主自带, 未兜底")
+
+# 4) openai 及其依赖栈（pydantic 纯 py 部分必须与 pydantic_core 成套，
+#    兜底时全套用内置副本，避免与宿主残缺环境交叉配对）
+if not _vendor_probe("openai"):
+    _need_pydantic = not _vendor_probe("pydantic")
+    for _pkg in ("typing_extensions", "annotated_types", "sniffio", "idna", "anyio",
+                 "distro", "tqdm", "typing_inspection", "jiter", "certifi",
+                 "h11", "httpcore", "httpx"):
+        if not _vendor_probe(_pkg):
+            _p = str(VENDOR_DIR / "openai_stack" / _pkg)
+            if os.path.isdir(_p):
+                _vendor_spec_load(_pkg, os.path.join(_p, "__init__.py"), _p)
+            else:
+                _f = str(VENDOR_DIR / "openai_stack" / (_pkg + ".py"))
+                if os.path.isfile(_f):
+                    _vendor_spec_load(_pkg, _f)
+    if _need_pydantic:
+        # 成套强制内置：只要纯 py 部分缺失，core 也必须用内置副本（版本配对），
+        # 即便宿主恰好带了一个孤立/残缺的 pydantic_core
+        _init, _dir = _vendor_pkg_dir("openai_stack", "pydantic_core")
+        _vendor_spec_load("pydantic_core", _init, _dir)
+        _init, _dir = _vendor_pkg_dir("openai_stack", "pydantic")
+        _vendor_spec_load("pydantic", _init, _dir)
+    _init, _dir = _vendor_pkg_dir("openai_stack", "openai")
+    _vendor_spec_load("openai", _init, _dir)
+else:
+    _VENDOR_BOOTSTRAP_TRACE.append("openai: 宿主自带, 未兜底")
 
 DEFAULT_GOAL = "自动玩完当前这一关并尽可能取得胜利"
 
