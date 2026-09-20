@@ -578,10 +578,10 @@ class PvZAgentService:
         try:
             cfg = core.config.load_config(self._api_cfg)
         except SystemExit as exc:
+            detail = str(exc).strip() or str(exc.code)
             raise RuntimeError(
-                f"PVZ 配置不完整（{exc.code}）。请在插件配置 plugin.toml 的 "
-                "[pvz_agent] 段填写 api_base_url / api_model / api_key"
-                "（旧版 pvz/.env 仍兼容）。"
+                f"PVZ 配置不完整：{detail}。可在插件配置 plugin.toml 的 [pvz_agent] 段填 "
+                "api_base_url / api_model / api_key（旧版 pvz/.env 仍兼容）。"
             )
         # 应用插件级开关（覆盖 pvz/config.json 的对应项）
         cfg.sun.enabled = bool(cfg.sun.enabled) and self._sun_auto_collect

@@ -491,13 +491,13 @@ def load_config(plugin_cfg: dict | None = None) -> AppConfig:
         print('  api_model    = "你的模型名"')
         print('  api_key      = "你的密钥"')
         print(f"（旧版方式仍兼容：pvz/.env 里填 {_env_prefix}API_KEY 等。）")
-        raise SystemExit(1)
+        raise SystemExit(f"缺少 AI 决策密钥（plugin.toml 的 api_key 或 pvz/.env 的 {_env_prefix}API_KEY）")
 
     if not _decision.base_url:
         _decision.base_url = env_get(f"{_env_prefix}BASE_URL", "https://api.openai.com/v1")
     if not _decision.model:
         print("[配置] 未找到 AI 模型名。请在 plugin.toml [pvz_agent] 填 api_model")
         print(f"（旧版方式仍兼容：pvz/.env 里填 {_env_prefix}MODEL。）")
-        raise SystemExit(1)
+        raise SystemExit(f"缺少 AI 模型名（plugin.toml 的 api_model 或 pvz/.env 的 {_env_prefix}MODEL）")
 
     return app
