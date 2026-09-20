@@ -4,16 +4,62 @@ from __future__ import annotations
 
 import base64
 import ctypes
+import importlib.util
 import io
 import os
+import sys
 import time
 from typing import Any, Callable
 
-import win32api
-import win32con
-import win32gui
-import win32process
-from PIL import Image, ImageGrab
+
+# ── 内置 pywin32 兜底（不依赖 sys.path）────────────────────────────────
+# Steam 版宿主的内嵌环境缺 win32gui/win32con/win32process（pywin32 只打包了
+# 部分 .pyd），自检报 "No module named 'win32gui'" → 窗口永远"未找到"。
+# 宿主齐全时直接用自带的；缺失时按绝对路径 spec 加载 pvz/vendor/pywin32/
+# 下的内置副本并注册进 sys.modules——不经过 sys.path 查找，宿主如何重排
+# 或沙箱化导入路径都不影响。win32api / pywintypes 仍用宿主自带副本。
+def _load_bundled_win32() -> None:
+    for _name in ("win32api", "win32con", "win32gui", "win32process"):
+        if importlib.util.find_spec(_name) is None:
+            break
+    else:
+        return  # 宿主环境齐全，用自带的
+    base = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "vendor", "pywin32"
+    )
+    for _name, _fname in (
+        ("win32con", "win32con.py"),
+        ("win32process", "win32process.pyd"),
+        ("win32gui", "win32gui.pyd"),
+    ):
+        if _name in sys.modules:
+            continue
+        _path = os.path.join(base, _fname)
+        if not os.path.isfile(_path):
+            continue
+        _spec = importlib.util.spec_from_file_location(_name, _path)
+        if _spec is None or _spec.loader is None:
+            continue
+        try:
+            _mod = importlib.util.module_from_spec(_spec)
+            sys.modules[_name] = _mod
+            _spec.loader.exec_module(_mod)
+        except Exception:  # 加载失败（如 pyd 版本不符）→ 交给原生 import 报真实错误
+            sys.modules.pop(_name, None)
+
+
+def _import_native_deps() -> None:
+    """先做内置兜底，再统一导入原生依赖（打包宿主缺模块时避免 import 即失败）。"""
+    global win32api, win32con, win32gui, win32process, Image, ImageGrab
+    _load_bundled_win32()
+    import win32api
+    import win32con
+    import win32gui
+    import win32process
+    from PIL import Image, ImageGrab
+
+
+_import_native_deps()
 
 # 与 xzx.py 一致：进程设为系统 DPI 感知。
 # 否则高 DPI 缩放下 GetClientRect/ClientToScreen 返回虚拟化坐标，

@@ -51,6 +51,8 @@ if str(VENDOR_DIR) not in sys.path:
 # 健康宿主下面这些探测直接命中，内置副本不参与导入（pyd 与解释器版本强相关，
 # 优先用宿主自带的）；缺失/残缺时才把对应目录挂到 sys.path 最前，并清掉残缺
 # 的命名空间包缓存，保证成套版本自洽（openai_stack 含配套 pydantic/pydantic_core）。
+_VENDOR_BOOTSTRAP_TRACE: list[str] = []  # 诊断：兜底探测轨迹（导入失败时随日志输出）
+
 for _fallback_pkg, _fallback_attr, _fallback_dir in (
     ("win32gui", None, VENDOR_DIR / "pywin32"),
     ("pyautogui", None, VENDOR_DIR / "pyautogui_stack"),
@@ -61,11 +63,17 @@ for _fallback_pkg, _fallback_attr, _fallback_dir in (
         _fallback_module = __import__(_fallback_pkg)
         if _fallback_attr is not None and not hasattr(_fallback_module, _fallback_attr):
             raise ImportError(f"{_fallback_pkg}.{_fallback_attr} missing (残缺的命名空间包)")
-    except Exception:  # ImportError / 命名空间残缺 / pyd 加载失败都走兜底
+        _VENDOR_BOOTSTRAP_TRACE.append(
+            f"{_fallback_pkg}: 宿主自带可导入, 未挂载 (module={getattr(_fallback_module, '__file__', None)})"
+        )
+    except Exception as _fallback_exc:  # ImportError / 命名空间残缺 / pyd 加载失败都走兜底
         _fallback_path = str(_fallback_dir)
         if _fallback_path not in sys.path:
             sys.path.insert(0, _fallback_path)
         sys.modules.pop(_fallback_pkg, None)  # 清掉残缺的命名空间包缓存
+        _VENDOR_BOOTSTRAP_TRACE.append(
+            f"{_fallback_pkg}: 兜底挂载 {_fallback_path} (原因: {_fallback_exc!r})"
+        )
 
 DEFAULT_GOAL = "自动玩完当前这一关并尽可能取得胜利"
 
@@ -254,6 +262,7 @@ class PvZAgentService:
     def _import_core(self) -> Any:
         if self._core is None:
             import importlib
+            import traceback as _tb
 
             import pvz_agent  # noqa: PLC0415  # pvz/ 已在 sys.path
 
@@ -267,7 +276,25 @@ class PvZAgentService:
                 "executor", "parser", "planner", "prompts", "vlm", "window",
                 "memory_engine",
             ):
-                importlib.import_module(f"pvz_agent.{_name}")
+                try:
+                    importlib.import_module(f"pvz_agent.{_name}")
+                except Exception:
+                    # 诊断：完整 traceback + 运行环境快照（排查打包宿主缺依赖/路径问题）
+                    try:
+                        self._logger.error(
+                            "[pvz-agent] 核心模块 %r 导入失败\n%s\n"
+                            "exe=%r\npvz_agent=%r\npvz_agent.service=%r\nsys.path=%r\nbootstrap=%r",
+                            _name,
+                            _tb.format_exc(),
+                            sys.executable,
+                            getattr(pvz_agent, "__file__", None),
+                            __file__,
+                            sys.path,
+                            _VENDOR_BOOTSTRAP_TRACE,
+                        )
+                    except Exception:  # 日志器不可用时不掩盖原异常
+                        pass
+                    raise
             self._core = pvz_agent
         return self._core
 
