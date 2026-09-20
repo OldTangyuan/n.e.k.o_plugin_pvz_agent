@@ -72,10 +72,14 @@ def _vendor_probe(pkg: str, attr: str | None = None) -> bool:
 
 
 def _vendor_spec_load(mod_name: str, path: str, pkg_dir: str | None = None) -> None:
-    """按绝对路径加载模块/包并注册进 sys.modules（幂等；失败仅记录不抛出）。"""
-    if mod_name in sys.modules:
-        return
+    """按绝对路径加载模块/包并强制注册进 sys.modules（失败仅记录不抛出）。
+
+    调用前提：探测已判定宿主该模块缺失/残缺。加载前强制弹出 sys.modules
+    里的旧实例（例如只剩 .pyd 的命名空间 PIL）——否则残缺实例残留会让后续
+    import 持续失败。
+    """
     try:
+        sys.modules.pop(mod_name, None)
         spec = importlib.util.spec_from_file_location(
             mod_name, path, submodule_search_locations=([pkg_dir] if pkg_dir else None)
         )
@@ -97,24 +101,61 @@ def _vendor_pkg_dir(group: str, name: str) -> tuple[str, str]:
     return os.path.join(d, "__init__.py"), d
 
 
-# 1) pywin32 三件套（win32api/pywintypes 仍用宿主自带副本）
-if not _vendor_probe("win32gui"):
+def _win32_gui_ok() -> bool:
+    """win32gui/win32process 能否真实导入（find_spec 发现不了 DLL 加载失败）。"""
+    try:
+        importlib.import_module("win32gui")
+        importlib.import_module("win32process")
+        return True
+    except Exception:
+        return False
+
+
+def _pil_ok() -> bool:
+    """PIL 是否真实可用（必须试导入子模块：PIL.__init__ 不预绑 Image 属性，
+    hasattr(PIL, "Image") 对任何健康 Pillow 都返回 False）。"""
+    try:
+        importlib.import_module("PIL.Image")
+        importlib.import_module("PIL.ImageGrab")
+        return True
+    except Exception:
+        return False
+
+
+# 内置 pyd 均为 cp311 编译：仅解释器为 3.11 时兜底才适用；其他版本宿主缺库
+# 时宁可走原生导入报真实错误，也不加载版本不符的二进制。
+_VENDOR_PY_OK = sys.version_info[:2] == (3, 11)
+
+
+# 1) pywin32 核心集：pyd 与 pywintypes311.dll 同目录分发（DLL_LOAD_DIR 解析，
+#    不依赖进程的 DLL 搜索路径——Steam 版宿主把它收得很紧，只带 pyd 不带 dll
+#    会报 "DLL load failed: 找不到指定的模块"）。加载顺序保证 pywintypes
+#    单实例：先 _win32sysloader（C 层探测/加载 DLL），再 pywintypes 垫片
+#    （内部回退到"与垫片同目录找 dll"），再 win32api，最后其余。
+if _win32_gui_ok():
+    _VENDOR_BOOTSTRAP_TRACE.append("win32gui: 宿主自带, 未兜底")
+elif _VENDOR_PY_OK:
     _pywin = str(VENDOR_DIR / "pywin32")
+    _vendor_spec_load("_win32sysloader", os.path.join(_pywin, "_win32sysloader.pyd"))
+    _vendor_spec_load("pywintypes", os.path.join(_pywin, "pywintypes.py"))
+    _vendor_spec_load("win32api", os.path.join(_pywin, "win32api.pyd"))
     _vendor_spec_load("win32con", os.path.join(_pywin, "win32con.py"))
     _vendor_spec_load("win32process", os.path.join(_pywin, "win32process.pyd"))
     _vendor_spec_load("win32gui", os.path.join(_pywin, "win32gui.pyd"))
 else:
-    _VENDOR_BOOTSTRAP_TRACE.append("win32gui: 宿主自带, 未兜底")
+    _VENDOR_BOOTSTRAP_TRACE.append("win32gui: 宿主缺失且解释器非 3.11, 跳过内置副本")
 
 # 2) PIL（Steam 版宿主的 PIL 是只剩 .pyd 的残缺命名空间包）
-if not _vendor_probe("PIL", "Image"):
+if _pil_ok():
+    _VENDOR_BOOTSTRAP_TRACE.append("PIL: 宿主自带, 未兜底")
+elif _VENDOR_PY_OK:
     _init, _dir = _vendor_pkg_dir("pillow", "PIL")
     _vendor_spec_load("PIL", _init, _dir)
 else:
-    _VENDOR_BOOTSTRAP_TRACE.append("PIL: 宿主自带, 未兜底")
+    _VENDOR_BOOTSTRAP_TRACE.append("PIL: 宿主缺失且解释器非 3.11, 跳过内置副本")
 
 # 3) pyautogui 执行栈（依赖序：先依赖后使用；pyrect 是 pygetwindow 的依赖）
-if not _vendor_probe("pyautogui"):
+if not _vendor_probe("pyautogui") and _VENDOR_PY_OK:
     for _pkg in ("pytweening", "pymsgbox", "pyrect", "pyperclip", "mouseinfo", "pygetwindow", "pyscreeze"):
         if not _vendor_probe(_pkg):
             _init, _dir = _vendor_pkg_dir("pyautogui_stack", _pkg)
@@ -122,11 +163,11 @@ if not _vendor_probe("pyautogui"):
     _init, _dir = _vendor_pkg_dir("pyautogui_stack", "pyautogui")
     _vendor_spec_load("pyautogui", _init, _dir)
 else:
-    _VENDOR_BOOTSTRAP_TRACE.append("pyautogui: 宿主自带, 未兜底")
+    _VENDOR_BOOTSTRAP_TRACE.append("pyautogui: 宿主自带或无需兜底, 未挂载")
 
 # 4) openai 及其依赖栈（pydantic 纯 py 部分必须与 pydantic_core 成套，
 #    兜底时全套用内置副本，避免与宿主残缺环境交叉配对）
-if not _vendor_probe("openai"):
+if not _vendor_probe("openai") and _VENDOR_PY_OK:
     _need_pydantic = not _vendor_probe("pydantic")
     for _pkg in ("typing_extensions", "annotated_types", "sniffio", "idna", "anyio",
                  "distro", "tqdm", "typing_inspection", "jiter", "certifi",

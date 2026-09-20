@@ -18,3 +18,7 @@ store.db
 # 密钥、截图与系统文件（禁止提交；pvz/.gitignore 另有插件级补充）
 .env
 .DS_Store
+
+# 插件内置原生依赖必须随市场包分发（上面的 *.py[cod] 会误伤 .pyd，负向排除）
+!pvz/vendor/**/*.pyd
+!pvz/vendor/**/*.dll

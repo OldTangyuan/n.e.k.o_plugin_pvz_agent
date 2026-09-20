@@ -1,6 +1,6 @@
 [project]
 name = "pvz_agent"
-version = "0.2.8"
+version = "0.2.9"
 # 运行时依赖由宿主（N.E.K.O）共享环境提供（openai/pywin32/Pillow），插件不声明以免
 # 触发宿主校验要求 vendoring；Steam 版宿主内嵌环境缺失/残缺的部分已按需 vendored
 # 在 pvz/vendor/{pywin32,pyautogui_stack,pillow,openai_stack}/（见 pvz/vendor/README.md）。

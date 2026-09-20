@@ -15,19 +15,26 @@ from typing import Any, Callable
 # ── 内置 pywin32 兜底（不依赖 sys.path）────────────────────────────────
 # Steam 版宿主的内嵌环境缺 win32gui/win32con/win32process（pywin32 只打包了
 # 部分 .pyd），自检报 "No module named 'win32gui'" → 窗口永远"未找到"。
-# 宿主齐全时直接用自带的；缺失时按绝对路径 spec 加载 pvz/vendor/pywin32/
-# 下的内置副本并注册进 sys.modules——不经过 sys.path 查找，宿主如何重排
-# 或沙箱化导入路径都不影响。win32api / pywintypes 仍用宿主自带副本。
+# 宿主齐全时直接用自带的；缺失/DLL 加载失败时按绝对路径 spec 加载
+# pvz/vendor/pywin32/ 下的内置副本（pyd 与 pywintypes311.dll 同目录分发，
+# 依赖 DLL 走 DLL_LOAD_DIR 解析，不依赖进程的 DLL 搜索路径）并注册进
+# sys.modules——不经过 sys.path 查找，宿主如何重排导入路径都不影响。
 def _load_bundled_win32() -> None:
-    for _name in ("win32api", "win32con", "win32gui", "win32process"):
-        if importlib.util.find_spec(_name) is None:
-            break
-    else:
+    if sys.version_info[:2] != (3, 11):
+        return  # 内置 pyd 为 cp311 编译，其他版本宿主走原生导入
+    try:  # find_spec 发现不了 DLL 加载失败，必须真实试导入
+        importlib.import_module("win32gui")
+        importlib.import_module("win32process")
         return  # 宿主环境齐全，用自带的
+    except Exception:
+        pass
     base = os.path.join(
         os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "vendor", "pywin32"
     )
     for _name, _fname in (
+        ("_win32sysloader", "_win32sysloader.pyd"),
+        ("pywintypes", "pywintypes.py"),  # 垫片：内部回退到"与垫片同目录找 dll"
+        ("win32api", "win32api.pyd"),
         ("win32con", "win32con.py"),
         ("win32process", "win32process.pyd"),
         ("win32gui", "win32gui.pyd"),
