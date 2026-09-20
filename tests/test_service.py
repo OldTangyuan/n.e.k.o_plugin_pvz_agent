@@ -490,6 +490,51 @@ def test_config_tool_call_mode_parsed_and_invalid_fallback() -> None:
         assert cfg_mod.load_config().tool_call_mode == "regex"  # 非法回退 regex
 
 
+def test_config_plugin_toml_api_overrides_env_and_fallback() -> None:
+    """plugin.toml [pvz_agent] 的 api_* 非空值覆盖 .env；text_api_* 缺省回退 api_*。"""
+    import tempfile
+    from pathlib import Path
+
+    from pvz_agent import config as cfg_mod
+
+    tmp = Path(tempfile.mkdtemp())
+    env = tmp / ".env"
+    env.write_text(
+        "VLM_BASE_URL=https://env/v1\nVLM_MODEL=env-model\nVLM_API_KEY=env-key\n",
+        encoding="utf-8",
+    )
+    cfg_file = tmp / "config.json"
+    cfg_file.write_text("{}", encoding="utf-8")
+
+    # plugin.toml 覆盖 .env；text_api_* 留空回退 api_* 覆盖值
+    plugin_cfg = {
+        "api_base_url": "https://toml/v1",
+        "api_model": "toml-model",
+        "api_key": "toml-key",
+    }
+    with mock.patch.object(cfg_mod, "ENV_FILE", env), mock.patch.object(cfg_mod, "CONFIG_FILE", cfg_file):
+        app = cfg_mod.load_config(plugin_cfg)
+    assert app.vlm.base_url == "https://toml/v1"
+    assert app.vlm.model == "toml-model"
+    assert app.vlm.api_key == "toml-key"
+    assert app.text_vlm.base_url == "https://toml/v1"
+    assert app.text_vlm.model == "toml-model"
+    assert app.text_vlm.api_key == "toml-key"
+
+    # text_api_* 显式覆盖优先于 api_*；plugin.toml 留空时回退 .env 旧链路
+    plugin_cfg2 = dict(plugin_cfg, text_api_model="text-only-model")
+    with mock.patch.object(cfg_mod, "ENV_FILE", env), mock.patch.object(cfg_mod, "CONFIG_FILE", cfg_file):
+        app2 = cfg_mod.load_config(plugin_cfg2)
+    assert app2.text_vlm.model == "text-only-model"
+    assert app2.text_vlm.api_key == "toml-key"
+
+    with mock.patch.object(cfg_mod, "ENV_FILE", env), mock.patch.object(cfg_mod, "CONFIG_FILE", cfg_file):
+        app3 = cfg_mod.load_config(None)
+    assert app3.vlm.base_url == "https://env/v1"
+    assert app3.vlm.model == "env-model"
+    assert app3.vlm.api_key == "env-key"
+
+
 def test_memory_engine_grid_dims_from_memory_and_fallback() -> None:
     """棋盘行数以读内存为准（割草机数量），列数回退；读失败回退 config。"""
     from pvz_agent.memory_engine import MemoryGameEngine

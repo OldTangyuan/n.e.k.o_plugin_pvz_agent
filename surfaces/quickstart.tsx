@@ -46,7 +46,7 @@ type StatusState = {
   goal: string
   error: string
   notRunning: boolean
-  envPath: string
+  pluginTomlPath: string
 }
 
 // 解包 hosted-surface action 返回的 envelope（{plugin_id, action_id, result}）。
@@ -72,7 +72,7 @@ export default function PvZAgentQuickstart(props: PluginSurfaceProps) {
     goal: "",
     error: "",
     notRunning: false,
-    envPath: "",
+    pluginTomlPath: "",
   })
   const refreshingRef = useRef(false)
   const selectingRef = useRef(false)
@@ -106,7 +106,7 @@ export default function PvZAgentQuickstart(props: PluginSurfaceProps) {
         goal: String(data.goal || ""),
         error: "",
         notRunning: false,
-        envPath: String(cfgPaths.env || ""),
+        pluginTomlPath: String(cfgPaths.plugin_toml || ""),
       })
     } catch (exc: any) {
       if (unmountedRef.current) return
@@ -218,9 +218,10 @@ export default function PvZAgentQuickstart(props: PluginSurfaceProps) {
             pvz/config.json 的 window_titles（保存即生效）。
           </Step>
           <Step index="2" title="配置 AI 决策">
-            把插件目录 pvz/.env.example 复制为 **pvz/.env**（路径见下方「配置文件位置」卡片），
-            填入 AI 服务地址与密钥。**纯文本模式填 TEXT_VLM_MODEL**（可只填这一个，URL/密钥
-            复用 VLM_*）；视觉模式填 VLM_MODEL。不配置则无法自主决策。
+            在插件配置 **plugin.toml** 的 `[pvz_agent]` 段填三个键：`api_base_url`
+            （OpenAI 兼容接口地址）、`api_model`（模型名）、`api_key`（密钥）——
+            vision / text 两种模式共用这一组（路径见下方「配置文件位置」卡片）。
+            纯文本模式想用不同模型时，可另填 `text_api_model` 等覆盖。不配置则无法自主决策。
           </Step>
           <Step index="3" title="手动选卡后开始">
             默认**选卡由你手动操作**（agent_controls_seed_selection=false，选卡不触发 LLM）：
@@ -230,13 +231,13 @@ export default function PvZAgentQuickstart(props: PluginSurfaceProps) {
         </Steps>
       </Card>
 
-      {state.envPath ? (
-        <Card title="配置文件位置（.env 在这里）">
-          <Text>把 `pvz/.env.example` 复制为下面的文件并填写 AI 密钥/模型：</Text>
-          <Text>{state.envPath}</Text>
+      {state.pluginTomlPath ? (
+        <Card title="配置文件位置（plugin.toml 在这里）">
+          <Text>在下面文件的 `[pvz_agent]` 段填写 AI 服务地址 / 模型 / 密钥（api_* 三个键）：</Text>
+          <Text>{state.pluginTomlPath}</Text>
           <Text>
-            其它配置：`plugin.toml` 的 [pvz_agent] 段（插件开关）、`pvz/config.json`
-            （核心行为/布局）。改完保存后**重启插件**生效。
+            其它配置：`pvz/config.json`（核心行为/布局坐标）。旧版 `pvz/.env` 仍兼容读取，
+            但 plugin.toml 里的非空 api_* 值优先。
           </Text>
         </Card>
       ) : null}
@@ -260,8 +261,8 @@ export default function PvZAgentQuickstart(props: PluginSurfaceProps) {
             window_titles（保存即生效）。
           </Step>
           <Step index="2" title="AI 决策未就绪">
-            说明还没配置 AI 决策：纯文本模式在 pvz/.env 填 TEXT_VLM_MODEL，视觉模式填
-            VLM_MODEL，填好并重启插件。
+            说明还没配置 AI 决策：在插件配置 plugin.toml 的 [pvz_agent] 段填
+            `api_base_url` / `api_model` / `api_key`，保存后重启插件生效。
           </Step>
           <Step index="3" title="纯文本模式提示“内存连接失败”">
             确认游戏已启动且为受支持的版本；刚启动游戏的话稍等片刻重试，或重启插件。
@@ -275,6 +276,9 @@ export default function PvZAgentQuickstart(props: PluginSurfaceProps) {
       <Card title="配置（plugin.toml [pvz_agent]）">
         <KeyValue
           items={[
+            { key: "api_base_url", label: "AI 服务地址", value: "OpenAI 兼容接口，如 https://api.example.com/v1" },
+            { key: "api_model", label: "AI 模型", value: "vision / text 两种模式共用" },
+            { key: "api_key", label: "AI 密钥", value: "服务密钥；text_api_* 可选覆盖纯文本模式" },
             { key: "mode", label: "运行模式", value: '"text"=纯文本内存(默认) / "vision"=视觉' },
             { key: "agent_controls_seed_selection", label: "AgentB 操控选卡", value: "false(默认，手动选卡)" },
             { key: "tool_call_mode", label: "工具调用", value: '"fc"=原生函数调用 / "regex"=简化正则' },
@@ -287,8 +291,8 @@ export default function PvZAgentQuickstart(props: PluginSurfaceProps) {
       </Card>
 
       <Warning>
-        猫娘的 AI 决策需要能联网调用 AI 服务（在 pvz/.env 配置）。没配置时面板会显示
-        “AI 决策未就绪”，点「开始游玩」会提示错误。
+        猫娘的 AI 决策需要能联网调用 AI 服务（在 plugin.toml 的 [pvz_agent] 段配置
+        api_key 等）。没配置时面板会显示“AI 决策未就绪”，点「开始游玩」会提示错误。
       </Warning>
 
       <Alert tone="info">

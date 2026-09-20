@@ -289,6 +289,7 @@ class PvZAgentService:
         self._mode = "text"                      # "vision"=OpenCV 视觉方案 / "text"=纯文本内存方案
         self._agent_selects_seeds = False        # 是否允许 AgentB 操控选卡（默认关）
         self._tool_call_mode = "fc"             # "regex"=简化正则 / "fc"=原生函数调用
+        self._api_cfg: dict[str, str] = {}       # AI 服务配置（plugin.toml api_*，configure 填充）
         self._window_titles: list[str] = list(DEFAULT_WINDOW_TITLES)
         self._window_poll_interval: float = 1.0   # 等待窗口时的轮询间隔（秒）
         self._memory_engine: Any = None           # text 模式的内存运行时（_ensure_memory 填充）
@@ -372,6 +373,15 @@ class PvZAgentService:
             self._feed_max_edge = int(plugin_cfg.get("screenshot_max_edge_px", 0) or 0)
             self._feed_quality = int(plugin_cfg.get("screenshot_jpeg_quality", 95) or 95)
             self._feed_max_bytes = int(plugin_cfg.get("screenshot_max_bytes", 160 * 1024) or (160 * 1024))
+            # AI 服务配置（plugin.toml [pvz_agent] 的 api_* 键）：非空值在
+            # load_config 里覆盖 .env / config.json——密钥不再需要单独配 pvz/.env。
+            self._api_cfg = {
+                k: str(plugin_cfg.get(k, "") or "").strip()
+                for k in (
+                    "api_base_url", "api_model", "api_key",
+                    "text_api_base_url", "text_api_model", "text_api_key",
+                )
+            }
 
     # ------------------------------------------------------------------ #
     #  懒加载：窗口（无需 VLM）与完整运行时（需要 VLM 密钥）
@@ -556,8 +566,9 @@ class PvZAgentService:
     ) -> Any:
         """构建完整运行时（执行器/扫描器/VLM/planner）。
 
-        需要 pvz/.env 的 AI 决策密钥（执行核心决策用）；缺失时抛 RuntimeError
-        （携带指引），由调用方转成可读错误返回。反复调用幂等。
+        需要 AI 决策密钥：plugin.toml [pvz_agent] 的 api_key（推荐），旧版
+        pvz/.env 仍兼容；缺失时抛 RuntimeError（携带指引），由调用方转成可读
+        错误返回。反复调用幂等。
         ``window_timeout``/``window_cancel`` 透传给窗口轮询（见 ``_ensure_window``）。
         """
         if self._planner is not None:
@@ -565,11 +576,12 @@ class PvZAgentService:
         win = self._ensure_window(timeout=window_timeout, cancel=window_cancel)
         core = self._import_core()
         try:
-            cfg = core.config.load_config()
+            cfg = core.config.load_config(self._api_cfg)
         except SystemExit as exc:
             raise RuntimeError(
-                f"PVZ 配置不完整（{exc.code}）。请检查 pvz/.env："
-                "AI 服务地址 / 模型 / 密钥（参照 pvz/.env.example）。"
+                f"PVZ 配置不完整（{exc.code}）。请在插件配置 plugin.toml 的 "
+                "[pvz_agent] 段填写 api_base_url / api_model / api_key"
+                "（旧版 pvz/.env 仍兼容）。"
             )
         # 应用插件级开关（覆盖 pvz/config.json 的对应项）
         cfg.sun.enabled = bool(cfg.sun.enabled) and self._sun_auto_collect
@@ -773,10 +785,12 @@ class PvZAgentService:
             "windows": windows,
             "memory": self._memory_status(),
             "config_paths": {
-                # 配置文件绝对路径，方便用户直接去对应文件夹编辑
-                "env": str(CORE_DIR / ".env"),
+                # 配置文件绝对路径，方便用户直接去对应文件夹编辑。
+                # AI 密钥/模型新版直接写在 plugin.toml [pvz_agent]（api_* 键）；
+                # .env 为旧版兼容（仍读取，但会被 plugin.toml 非空值覆盖）。
                 "plugin_toml": str(Path(__file__).resolve().parent / "plugin.toml"),
                 "core_config": str(CORE_DIR / "config.json"),
+                "env": str(CORE_DIR / ".env"),
             },
             "feed": {"enabled": feed_enabled, "last_push_at": last_feed_at},
             "steps": step_count,

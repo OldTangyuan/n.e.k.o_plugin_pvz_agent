@@ -106,7 +106,7 @@ class PvZNekoInterface:
         win = _as_mapping(status.get("window"))
         title = str(win.get("title") or "")
         window_part = f"窗口: {title}" if title else "窗口: 未找到"
-        ready_part = "AI 决策就绪" if status.get("ready") else "AI 决策未就绪（需在 pvz/.env 配置）"
+        ready_part = "AI 决策就绪" if status.get("ready") else "AI 决策未就绪（需在插件配置 plugin.toml 填 api_key）"
         goal_part = f"目标: {goal}" if goal else "目标: 未设置"
         return f"phase={phase} | {goal_part} | 步数={steps} | {window_part} | {ready_part}"
 

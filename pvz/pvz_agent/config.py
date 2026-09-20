@@ -1,4 +1,9 @@
-"""配置加载：.env（密钥/URL） + config.json（布局/行为） → 全局 settings 对象。"""
+"""配置加载：plugin.toml（AI 服务/行为开关） + .env（旧版密钥回退） + config.json（布局/行为） → 全局 settings 对象。
+
+AI 密钥/模型新版直接写在插件 plugin.toml 的 [pvz_agent] 段（api_base_url /
+api_model / api_key，text_api_* 可选覆盖纯文本模式），由宿主 configure() 注入；
+旧版 pvz/.env 与环境变量仍兼容读取，但非空的 plugin.toml 值优先。
+"""
 
 from __future__ import annotations
 
@@ -20,7 +25,7 @@ ENV_EXAMPLE = BASE_DIR / ".env.example"
 # --------------------------------------------------------------------------- #
 @dataclass
 class VLMConfig:
-    """VLM 接口配置（密钥类，来自 .env / 环境变量）。"""
+    """VLM 接口配置（密钥类，来自 plugin.toml [pvz_agent] / .env / 环境变量）。"""
 
     base_url: str = ""
     model: str = ""
@@ -266,11 +271,13 @@ def _load_json(path: Path) -> dict:
         return {}
 
 
-def load_config() -> AppConfig:
-    """读取 .env + config.json 合并为 AppConfig。
+def load_config(plugin_cfg: dict | None = None) -> AppConfig:
+    """读取 plugin.toml（注入值） + .env + config.json 合并为 AppConfig。
 
-    优先级：.env 中已设置的环境变量 > .env 文件 > 默认值。
+    优先级：plugin.toml [pvz_agent] 的 api_*（非空值） > 环境变量 > .env 文件 > 默认值。
     api_key 未配置时打印指引并退出（不静默带默认密钥）。
+    ``plugin_cfg``：宿主注入的 [pvz_agent] 段（service.configure 通道）；独立运行
+    （main/calibrate）不传，走 .env/config.json 旧链路。
     """
     env = _load_env(ENV_FILE)
     jcfg = _load_json(CONFIG_FILE)
@@ -293,7 +300,23 @@ def load_config() -> AppConfig:
         tool_choice=jcfg.get("vlm", {}).get("tool_choice", "required"),
     )
 
-    # ---- 纯文本模式 VLM（完全独立：TEXT_VLM_* 优先，缺省回退 VLM_*；行为来自 text_vlm 段）----
+    # ---- 插件级 AI 服务配置（plugin.toml [pvz_agent]，非空值优先覆盖）----
+    # 新版把密钥/模型直接写在 plugin.toml；.env 与环境变量仍兼容（回退链）。
+    # 注意：必须先覆盖 vlm 再构建 text_vlm——text 的构造期回退（or vlm.*）才能
+    # 拿到 plugin.toml 的值（否则只配 api_key 时 text 模式拿不到）。
+    _pc = plugin_cfg if isinstance(plugin_cfg, dict) else {}
+
+    def _pc_get(key: str) -> str:
+        return str(_pc.get(key, "") or "").strip()
+
+    if _pc_get("api_base_url"):
+        vlm.base_url = _pc_get("api_base_url")
+    if _pc_get("api_model"):
+        vlm.model = _pc_get("api_model")
+    if _pc_get("api_key"):
+        vlm.api_key = _pc_get("api_key")
+
+    # ---- 纯文本模式 VLM（完全独立：TEXT_VLM_* / text_api_* 优先，缺省回退 vlm；行为来自 text_vlm 段）----
     tv = jcfg.get("text_vlm", {}) if isinstance(jcfg.get("text_vlm"), dict) else {}
     text_vlm = VLMConfig(
         base_url=env_get("TEXT_VLM_BASE_URL", "") or vlm.base_url,
@@ -308,6 +331,13 @@ def load_config() -> AppConfig:
         tool_choice=str(tv.get("tool_choice", "auto") or "auto").strip().lower(),
     )
     text_max_history_rounds = int(tv.get("max_history_rounds", 6))
+
+    if _pc_get("text_api_base_url"):
+        text_vlm.base_url = _pc_get("text_api_base_url")
+    if _pc_get("text_api_model"):
+        text_vlm.model = _pc_get("text_api_model")
+    if _pc_get("text_api_key"):
+        text_vlm.api_key = _pc_get("text_api_key")
 
     # ---- 布局（config.json）----
     lay = jcfg.get("layout", {})
@@ -456,17 +486,18 @@ def load_config() -> AppConfig:
     _decision = app.text_vlm if _mode == "text" else app.vlm
     _env_prefix = "TEXT_VLM_" if _mode == "text" else "VLM_"
     if not _decision.api_key:
-        print(f"[配置] 未找到 {_env_prefix}API_KEY。")
-        print("请在项目根目录复制 .env.example 为 .env，并填写：")
-        print(f"  {_env_prefix}BASE_URL=你的OpenAI兼容接口地址（如 https://api.example.com/v1）")
-        print(f"  {_env_prefix}MODEL=你的模型名")
-        print(f"  {_env_prefix}API_KEY=你的密钥")
+        print("[配置] 未找到 AI 决策密钥。请在插件配置 plugin.toml 的 [pvz_agent] 段填写：")
+        print('  api_base_url = "你的OpenAI兼容接口地址（如 https://api.example.com/v1）"')
+        print('  api_model    = "你的模型名"')
+        print('  api_key      = "你的密钥"')
+        print(f"（旧版方式仍兼容：pvz/.env 里填 {_env_prefix}API_KEY 等。）")
         raise SystemExit(1)
 
     if not _decision.base_url:
         _decision.base_url = env_get(f"{_env_prefix}BASE_URL", "https://api.openai.com/v1")
     if not _decision.model:
-        print(f"[配置] 未找到 {_env_prefix}MODEL。请在 .env 中指定模型名。")
+        print("[配置] 未找到 AI 模型名。请在 plugin.toml [pvz_agent] 填 api_model")
+        print(f"（旧版方式仍兼容：pvz/.env 里填 {_env_prefix}MODEL。）")
         raise SystemExit(1)
 
     return app

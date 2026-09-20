@@ -16,11 +16,21 @@ supported = ">=0.1.0,<0.3.0"
 enabled = true
 auto_start = false
 
-# 插件级行为配置。AI 决策密钥/模型仍在 pvz/.env（猫娘自主决策用，单来源）；
+# 插件级行为配置。AI 决策密钥/模型直接填在下面 [pvz_agent] 的 api_* 键
+# （无需再单独配置 pvz/.env；旧 .env 仍兼容读取，但会被这里的非空值覆盖）。
 # 布局坐标与 OpenCV 阈值仍在 pvz/config.json（calibrate 校准工具读写，保持联动）。
-# 这里的开关只控制插件自身行为。
 [pvz_agent]
-# 插件启动时是否自动开始游玩（猫娘实时操作；需游戏已打开 + pvz/.env 已配置）。
+# ── AI 决策服务（OpenAI 兼容接口；猫娘自主决策用，必填）──
+# 填一次，vision / text 两种模式共用；纯文本模式想用不同模型/密钥时，
+# 再填 text_api_* 覆盖（留空 = 复用上面这组）。
+api_base_url = ""   # 如 "https://api.example.com/v1"
+api_model = ""      # 模型名
+api_key = ""        # 服务密钥
+text_api_base_url = ""
+text_api_model = ""
+text_api_key = ""
+
+# 插件启动时是否自动开始游玩（猫娘实时操作；需游戏已打开 + AI 服务已配置）。
 auto_start = false
 
 # 运行模式：

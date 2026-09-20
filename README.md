@@ -23,13 +23,15 @@
    受支持版本，见上）。插件会按 `window_titles` 里的**精确标题**轮询查找游戏窗口；
    标题不符时改 `pvz/config.json` 或插件配置的 `window_titles`，保存即生效。
 
-2. **配置纯文本模型**（`pvz/.env`，把 `pvz/.env.example` 复制为 `.env` 后填写）：
-   ```
-   TEXT_VLM_MODEL=your-thinking-model      # 纯文本决策模型（可只填这个）
-   VLM_BASE_URL=https://api.example.com/v1 # TEXT_* 留空时回退用这套 URL/密钥
-   VLM_API_KEY=sk-xxxx
+2. **配置 AI 决策**（插件目录 `plugin.toml` 的 `[pvz_agent]` 段，填三个键即可）：
+   ```toml
+   api_base_url = "https://api.example.com/v1" # OpenAI 兼容接口地址
+   api_model = "your-thinking-model"           # 模型名
+   api_key = "sk-xxxx"                         # 服务密钥
    ```
    > 纯文本模式**默认开启思考模式 + 更多上下文**，建议用一个支持长思考的纯文本模型。
+   > vision / text 两种模式共用这组配置；纯文本想用不同模型时，再填 `text_api_model` 等
+   > 覆盖（留空回退上面）。旧版 `pvz/.env` 仍兼容读取，但 plugin.toml 非空值优先。
 
 3. **以管理员身份运行宿主**：读内存 + 代码注入需要管理员权限，否则连接会失败。
 
@@ -39,8 +41,8 @@
 > 插件面板「快速开始」页有实时状态（游玩状态 / AI 决策 / 游戏窗口 / 内存连接）+ 开始 /
 > 暂停 / 停止按钮，可以直接操作。
 
-> 想用**视觉方案**？把 `mode` 改成 `"vision"`，并在 `.env` 填视觉模型 `VLM_MODEL`（见
-> 下方「两种模式」）。
+> 想用**视觉方案**？把 `mode` 改成 `"vision"`，并把 `api_model` 换成支持视觉的模型
+> 即可（服务地址/密钥共用同一组 `api_*` 配置，见下方「两种模式」）。
 
 ---
 
@@ -101,20 +103,22 @@
 | `notify_on_terminate` | true | 本关结束时推送通报 |
 | `notify_window_lost` | true | 游戏窗口丢失时推送通报并停止 |
 
-### 配置文件在哪里（三处，各管各的）
+### 配置文件在哪里（两处，各管各的）
 
 | 文件 | 位置 | 管什么 |
 |---|---|---|
-| **`.env`** | 插件目录下的 `pvz/.env`（把 `pvz/.env.example` 复制改名） | **AI 密钥/模型**：`TEXT_VLM_*`（纯文本模式）、`VLM_*`（视觉模式） |
-| **`plugin.toml`** | 插件目录 `plugin.toml` → `[pvz_agent]` 段 | **插件开关**：`mode` / `tool_call_mode` / `agent_controls_seed_selection` / 截图推送 / 通知等 |
+| **`plugin.toml`** | 插件目录 `plugin.toml` → `[pvz_agent]` 段 | **AI 服务 + 插件开关**：`api_base_url` / `api_model` / `api_key`（vision/text 共用，`text_api_*` 可选覆盖纯文本）、`mode` / `tool_call_mode` / `agent_controls_seed_selection` / 截图推送 / 通知等 |
 | **`pvz/config.json`** | 插件目录 `pvz/config.json` | **核心行为/布局**：`text_vlm` 段（思考/上下文）、窗口标题、布局坐标等 |
 
-> 插件面板「快速开始」页会直接显示 `.env` 的**绝对路径**，照着去那个文件夹放文件即可。
+> 旧版 `pvz/.env`（AI 密钥/模型）**仍兼容读取**，但 plugin.toml 里的非空 `api_*` 值优先；
+> 新用户直接填 plugin.toml 即可，无需再复制 `.env.example`。
+> 插件面板「快速开始」页会直接显示 `plugin.toml` 的**绝对路径**，照着去填即可。
 > 改配置后**重启插件**生效。⚠️ 插件**直接读自带 `plugin.toml`**（不走宿主 runtime 副本），
 > 所以改 `plugin.toml` 是即时生效的——不要改宿主安装目录里的同名副本。
 
-**配置边界**：AI 服务密钥在 `pvz/.env`（单来源）。校准数值（布局坐标、OpenCV 阈值）在
-`pvz/config.json`，一般不需要动；只有画面点击位置明显偏了才需要按下文校准。
+**配置边界**：AI 服务密钥在 `plugin.toml` 的 `[pvz_agent]` 段（单来源）。校准数值
+（布局坐标、OpenCV 阈值）在 `pvz/config.json`，一般不需要动；只有画面点击位置明显偏了
+才需要按下文校准。
 
 ### 两种模式（怎么选）
 
@@ -140,11 +144,12 @@
 
 #### 纯文本模式的独立模型配置
 
-text 模式的 AI 决策用**完全独立的模型配置**（与视觉模式分开）：
-- `.env`：`TEXT_VLM_BASE_URL / TEXT_VLM_MODEL / TEXT_VLM_API_KEY`（留空则自动回退用 `VLM_*`，
-  此时只设 `TEXT_VLM_MODEL` 即可切换模型）。
+text 模式的 AI 决策可以**完全独立**（与视觉模式分开）：
+- `plugin.toml` `[pvz_agent]`：`text_api_base_url / text_api_model / text_api_key`
+  （留空则自动回退用 `api_*`，此时只设 `text_api_model` 即可切换模型）。
 - `pvz/config.json` 的 `text_vlm` 段：`thinking="enabled"`（**默认开启思考模式**）、
   `max_output_tokens=2048`、`max_history_rounds=6`（**更多历史上下文**）。
+- 旧版 `.env` 的 `TEXT_VLM_*` / `VLM_*` 键仍兼容，优先级低于 plugin.toml。
 
 #### 纯文本模式的行为设计
 - **不冻结游戏**：LLM 思考期间不暂停游戏（不用 `pause_for_thinking`），游戏照常推进；
@@ -183,8 +188,8 @@ cd plugin/plugins/pvz_agent/pvz
 **通用：**
 - **状态一直显示"未找到窗口"**：确认游戏已打开、没最小化，且窗口标题与 `window_titles`
   里的**精确标题**一致（窗口标题可以在任务栏悬停图标查看，或编辑配置里的 `window_titles`）。
-- **AI 决策未就绪**：`pvz/.env` 还没填密钥（text 模式看 `TEXT_VLM_*`，vision 看 `VLM_*`），
-  填好并重启插件。
+- **AI 决策未就绪**：`plugin.toml` 的 `[pvz_agent]` 段还没填 `api_key` 等（vision/text
+  共用 `api_*`；text 可用 `text_api_*` 覆盖），填好并重启插件。旧版 `pvz/.env` 仍兼容。
 - **点「开始游玩」报错**：先确认插件在运行，再确认游戏窗口和 AI 决策都就绪。
 - **猫娘一直没动静**：确认插件在运行、已开始游玩；若面板显示 AI 决策未就绪则先配好。
 
