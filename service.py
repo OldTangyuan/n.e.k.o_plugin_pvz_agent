@@ -942,6 +942,8 @@ class PvZAgentService:
                 with self._lock:
                     self._phase = self.PHASE_ERROR
                     self._last_error = str(exc)
+                # 错误同时落日志：此前只返回面板，日志无痕导致无法排障
+                self._logger.warning("[pvz-agent] 启动失败: %r", exc)
                 return {"status": "error", "message": str(exc), "summary": str(exc)}
             # 窗口缺失：继续走下面逻辑，让循环线程轮询等待
         with self._lock:
@@ -978,8 +980,13 @@ class PvZAgentService:
             )
             return {"status": "ok", "message": msg, "summary": msg, "waiting_window": True, "goal": self._goal}
         # 开局：立即把一张高质量原图推给主模型，让她一开打就能看到当前战局。
-        self._push_startup_screenshot()
+        # 截图抖动不应让整个启动失败——吞掉异常，循环里下一轮会再推。
+        try:
+            self._push_startup_screenshot()
+        except Exception as exc:
+            self._logger.warning("[pvz-agent] 开局截图推送失败（不影响启动）: %r", exc)
         msg = f"已开始游玩（猫娘自己看画面操作）。目标：{self._goal}"
+        self._logger.info("[pvz-agent] 开始游玩: mode=%s goal=%s", self._mode, self._goal)
         return {"status": "ok", "message": msg, "summary": msg, "goal": self._goal}
 
     def _is_window_error(self, exc: Exception) -> bool:
