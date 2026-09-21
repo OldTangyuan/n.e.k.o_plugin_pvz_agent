@@ -50,6 +50,37 @@ def _as_mapping(value: Any) -> JsonObject:
     return dict(value) if isinstance(value, Mapping) else {}
 
 
+def _nonempty_str(v: Any) -> bool:
+    """合并时的"有效值"判定：非 None、非空串、非纯空白串。"""
+    if v is None or v == "":
+        return False
+    if isinstance(v, str) and not v.strip():
+        return False
+    return True
+
+
+def merge_config_sources(
+    file_cfg: JsonObject, host_cfg: JsonObject, mtimes: tuple[float, float]
+) -> JsonObject:
+    """合并"插件自带 plugin.toml"与"宿主运行时配置"两个配置来源。
+
+    用户改配置有两条通道：直接编辑 plugin.toml，或在宿主 GUI 配置界面里改
+    （写进 profiles/default.toml，反映到 ``config.dump()``）。以**修改时间较新
+    的一方为基准**（用户最后编辑的通道整体生效），另一方里的非空值作补充——
+    两边都没填的键走内置默认，任何一边填了都能被读到，不再互相掩盖。
+    """
+    file_mtime, profile_mtime = mtimes
+    if host_cfg and profile_mtime > file_mtime:
+        base, overlay = dict(file_cfg), host_cfg
+    else:
+        base, overlay = dict(host_cfg), file_cfg
+    merged = dict(base)
+    for key, value in overlay.items():
+        if _nonempty_str(value):
+            merged[key] = value
+    return merged
+
+
 @neko_plugin
 class PVZAgentPlugin(NekoPluginBase):
     """PVZ Agent 插件 facade——只做 SDK 接线，业务在 service。"""
@@ -75,11 +106,20 @@ class PVZAgentPlugin(NekoPluginBase):
     # ------------------------------------------------------------------ #
     @lifecycle(id="startup")
     async def startup(self, **_: Any):
-        self._cfg = self._read_own_plugin_config()
-        # 若直接读不到（如插件目录无 plugin.toml），回退宿主 SDK 配置
-        if not self._cfg:
-            cfg = _as_mapping(await self.config.dump(timeout=5.0))
-            self._cfg = _as_mapping(cfg.get("pvz_agent", {}))
+        file_cfg = self._read_own_plugin_config()
+        # 宿主运行时配置（GUI 配置界面编辑会写进 profiles/default.toml，
+        # config.dump() 是"包默认值 + 用户覆盖"的合并视图）
+        host_cfg: JsonObject = {}
+        try:
+            dumped = _as_mapping(await self.config.dump(timeout=5.0))
+            host_cfg = _as_mapping(dumped.get("pvz_agent", {}))
+        except Exception as exc:
+            self.logger.warning("[pvz_agent] 读取宿主运行时配置失败（忽略）: %s", exc)
+        self._cfg = merge_config_sources(file_cfg, host_cfg, self._source_mtimes())
+        self.logger.info(
+            "[pvz_agent] 配置来源: 自带 plugin.toml %d 键 + 宿主运行时 %d 键 → 合并 %d 键",
+            len(file_cfg), len(host_cfg), len(self._cfg),
+        )
         self._service.configure(self._cfg)
         preflight = self._service.probe()
         self.logger.info("[pvz_agent] 自检: %s", preflight)
@@ -96,12 +136,27 @@ class PVZAgentPlugin(NekoPluginBase):
             status["autostart"] = self._service.start()
         return Ok(status)
 
+    def _source_mtimes(self) -> tuple[float, float]:
+        """（自带 plugin.toml mtime, profiles/default.toml mtime），不存在记 0。"""
+        root = Path(__file__).resolve().parent
+        file_toml = root / "plugin.toml"
+        profile_toml = root / "profiles" / "default.toml"
+        try:
+            file_mtime = file_toml.stat().st_mtime if file_toml.exists() else 0.0
+        except OSError:
+            file_mtime = 0.0
+        try:
+            profile_mtime = profile_toml.stat().st_mtime if profile_toml.exists() else 0.0
+        except OSError:
+            profile_mtime = 0.0
+        return file_mtime, profile_mtime
+
     def _read_own_plugin_config(self) -> dict:
         """直接读插件自带 plugin.toml 的 [pvz_agent] 段。
 
-        宿主的 ``config.dump()`` 返回的是首次运行后复制到宿主 state 目录的 runtime 配置，
-        改源码里的 plugin.toml 不会生效。这里**直接读插件目录的 plugin.toml**，
-        让编辑配置即时生效（重启后）；读取失败回退空 dict（由调用方走 SDK 配置）。
+        与宿主运行时配置（``config.dump()``，含 GUI 配置界面的用户覆盖）在
+        startup 里按修改时间新者胜合并（``merge_config_sources``）；
+        读取失败回退空 dict（由合并逻辑兜底）。
         """
         try:
             path = Path(__file__).resolve().parent / "plugin.toml"
