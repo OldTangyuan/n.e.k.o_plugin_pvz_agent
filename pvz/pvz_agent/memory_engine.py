@@ -51,6 +51,25 @@ class MemoryGameEngine:
         self._prev_in_select = False   # 上一轮是否处于选卡界面（用于检测新选卡会话）
         # 是否允许 AgentB 操控选卡界面（默认关：选卡场景不触发 LLM，由玩家手动选卡）。
         self._allow_seed_selection = False
+        # 把 pvz_memory 内部日志（注入动作/传送带收取/读取诊断）路由进插件文件日志，
+        # 否则 collect_belt、MouseClick、PutPlant 的细节在排障时完全不可见。
+        self._wire_pvz_memory_logging()
+
+    def _wire_pvz_memory_logging(self) -> None:
+        """把 pvz_memory 命名空间的日志挂到当前 logger 的 handler 上（幂等）。
+
+        插件的文件 logger 由宿主 SDK 创建，handler 已带文件输出；
+        pvz_memory 的模块 logger 默认没有 handler，INFO 细节全部丢失。
+        """
+        try:
+            pvz_logger = logging.getLogger("pvz_memory")
+            pvz_logger.setLevel(logging.INFO)
+            for h in self._logger.handlers:
+                if h not in pvz_logger.handlers:
+                    pvz_logger.addHandler(h)
+            pvz_logger.propagate = False  # 避免重复输出
+        except Exception:
+            pass  # 日志接线失败不影响主流程
 
     # ------------------------------------------------------------------ #
     #  连接 / 断开
