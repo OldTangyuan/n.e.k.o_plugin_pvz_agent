@@ -236,6 +236,7 @@ class PvZExecutor:
         return action in (
             "place_plant", "shovel",
             "use_cob_cannon", "click_card", "win_level", "select_seeds",
+            "collect_belt",
         )
 
     def execute(self, action: str, args: dict[str, Any], state: GameState) -> dict[str, Any]:
@@ -256,6 +257,8 @@ class PvZExecutor:
                 self._win_level(args, state, result)
             elif action == "select_seeds":
                 self._select_seeds(args, state, result)
+            elif action == "collect_belt":
+                self._collect_belt(args, state, result)
             else:
                 raise ValueError(f"未知 PvZ 动作: {action}")
         except Exception as exc:
@@ -465,6 +468,116 @@ class PvZExecutor:
             _win_click(sx, sy)
 
         result["detail"] = f"玉米炮 ({row},{col}) → ({target_row},{target_col})"
+
+    # 传送带排队区扫描点 (800x600 游戏画布): 传送带在顶部条带，未收取的
+    # 植物会堆积排队。从靠近卡栏右缘的一排点依次点击，点中即被收进卡栏。
+    # y 覆盖条带的典型高度带（传送带卡片视觉中心 y≈43±，卡高约 50px）。
+    _BELT_CLICK_POINTS: tuple[tuple[int, int], ...] = (
+        (120, 58), (170, 58), (220, 58), (270, 58), (320, 58), (390, 58),
+        (120, 42), (170, 42), (220, 42), (120, 74), (170, 74), (220, 74),
+    )
+
+    def _valid_seed_count(self) -> int:
+        """读当前"有效卡片"数（plant_type>=0），供 collect_belt 收前/收后校验。
+
+        读失败返回 -1（调用方据此退化为"点满一轮就算"）。
+        """
+        try:
+            off = self._mem.offsets
+            mo = self._mem.main_object
+            seed_array = self._mem.read_pointer(mo + off.seed_array)
+            if not seed_array:
+                return 0
+            count = self._mem.read_int(seed_array + off.seed_count)
+            n = 0
+            for i in range(min(max(count, 0), 10)):
+                card_addr = seed_array + off.seed_card_offset + i * off.seed_card_size
+                if self._mem.read_int(card_addr + off.sc_type) >= 0:
+                    n += 1
+            return n
+        except Exception:
+            return -1
+
+    def _collect_belt(self, args: dict, state: GameState, result: dict) -> None:
+        """传送带关卡：点击传送带把植物收进卡片栏（注入 MouseClick + 收数校验）。
+
+        原理：传送带上未收取的植物会堆积排队，点击即被收进卡片栏。
+        由于拿不到传送带队列的内存布局（偏移未开源），这里对排队区做
+        **扫描点击 + 收数校验**：每次点击后重读卡片数，计数增加才算收
+        到一张；整轮扫描都没收到就停（队列空 / 卡栏满）。
+
+        Args (从 args 读):
+            count: 想收取的张数（默认 3，上限 10——卡片栏容量）。
+        """
+        if not self._injector:
+            raise PvZMemoryError("collect_belt 需要代码注入器（当前为鼠标 fallback 模式）")
+
+        try:
+            want = int(args.get("count", 3) or 3)
+        except (TypeError, ValueError):
+            want = 3
+        want = max(1, min(want, 10))
+
+        # 先释放可能持有的卡片/铲子光标，避免点击落空
+        self._injector.release_mouse()
+        time.sleep(0.05)
+
+        collected: list[int] = []   # 本次收到的卡（在卡栏中的序号）
+        gained_rounds = 0           # 校验计数成功的收取次数（不依赖名字读取）
+        for _ in range(want):
+            base = self._valid_seed_count()
+            gained = False
+            for gx, gy in self._BELT_CLICK_POINTS:
+                self._injector.mouse_click(gx, gy)
+                time.sleep(0.2)
+                now = self._valid_seed_count()
+                if base >= 0 and now > base:
+                    gained = True
+                    break
+                if base < 0:
+                    # 校验不可用：点满一整轮就视为尽力而为
+                    break
+            if not gained:
+                break  # 一整轮没收到 → 队列空或卡栏满，停
+            gained_rounds += 1
+            # 读卡栏最后一张的名字（给模型即时反馈；读失败不影响计数）
+            fresh = self._mem_read_valid_seeds()
+            if fresh:
+                collected.append(fresh[-1][0])
+            time.sleep(0.3)
+
+        if gained_rounds:
+            if collected:
+                from .offsets import PLANT_NAMES  # noqa: PLC0415  # 局部导入避免环
+
+                names = ", ".join(PLANT_NAMES.get(t, f"类型{t}") for t in collected)
+                result["detail"] = f"从传送带收到 {gained_rounds} 张卡: {names}"
+            else:
+                result["detail"] = (
+                    f"从传送带收到 {gained_rounds} 张卡（种类读取失败，"
+                    "以下一轮【内存状态】的【卡片】列表为准）"
+                )
+        else:
+            result["detail"] = "传送带上没有可收取的植物（队列空或卡片栏已满）"
+
+    def _mem_read_valid_seeds(self) -> list[tuple[int, int]]:
+        """读当前有效卡片 [(槽位序号, 植物类型)]，collect_belt 反馈用。"""
+        try:
+            off = self._mem.offsets
+            mo = self._mem.main_object
+            seed_array = self._mem.read_pointer(mo + off.seed_array)
+            if not seed_array:
+                return []
+            count = self._mem.read_int(seed_array + off.seed_count)
+            out: list[tuple[int, int]] = []
+            for i in range(min(max(count, 0), 10)):
+                card_addr = seed_array + off.seed_card_offset + i * off.seed_card_size
+                t = self._mem.read_int(card_addr + off.sc_type)
+                if t >= 0:
+                    out.append((i, t))
+            return out
+        except Exception:
+            return []
 
     def _win_level(self, args: dict, state: GameState, result: dict) -> None:
         """直接通关 — 跳过当前关卡.

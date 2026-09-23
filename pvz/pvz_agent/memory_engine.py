@@ -31,6 +31,7 @@ class MemoryGameEngine:
         "shovel": 2.0,
         "click_card": 1.5,
         "select_seeds": 2.5,
+        "collect_belt": 2.5,
         "win_level": 3.0,
     }
     DEFAULT_DELAY: float = 1.5
@@ -323,7 +324,7 @@ class MemoryGameEngine:
         if action == "select_seeds":
             return self._execute_select_seeds(arguments, state)
 
-        if not state.in_battle and action in ("place_plant", "shovel", "win_level"):
+        if not state.in_battle and action in ("place_plant", "shovel", "win_level", "collect_belt"):
             return {"action": action, "status": "error",
                     "error": f"当前不在战斗中（UI={state.game_ui}），无法执行 {action}；可选卡请用 select_seeds"}
         return self._executor.execute(action, arguments, state)

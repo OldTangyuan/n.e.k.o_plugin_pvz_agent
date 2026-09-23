@@ -673,18 +673,12 @@ class PvZStateReader:
         - 行内标记关键状态 (冷却/血量/异常)
         - 僵尸按行分组, 便于战略决策
         """
-        # 生存模式过完一大波后进入新一轮选卡，game_ui 可能仍为 IN_GAME(3)，
-        # 但 seed_array 尚未初始化（所有卡片 plant_type<0），此时应视为选卡界面。
-        all_cards_invalid = (
-            state.in_battle
-            and state.seeds
-            and all(s.plant_type < 0 for s in state.seeds)
-        )
-        if all_cards_invalid:
-            state.game_ui = GameUI.SELECT_CARD
-            # 注意: 修改 game_ui 后 in_battle property 会自动重算为 False，
-            # 不能再给它赋值（它是只读 property，原项目此处赋值会抛 AttributeError）。
-
+        # 注意: 这里**不再**把"战斗中卡片全空"强行改判为选卡界面。
+        # 该旧判定会把传送带关卡（种子栏开局为空/全无效）误判成选卡界面，
+        # 让模型反复调用 select_seeds（传送带关没有选卡 UI，永远无效），
+        # 整关死锁不种植物。传送带关的正确呈现是：战斗中 + 卡片栏空 +
+        # collect_belt 提示（见下方卡片段）。生存模式换轮过渡期 game_ui
+        # 很快回到 SELECT_CARD(2)，即便误显示一两轮战斗状态也无碍。
         if not state.in_battle:
             ui_names = {1: "主界面", 2: "选卡界面", 3: "战斗界面"}
             label = ui_names.get(state.game_ui, "未知")
@@ -764,8 +758,11 @@ class PvZStateReader:
         # 关键: 只要 cd>0 就显示冷却剩余秒数，不因 is_usable 不可靠而吞掉冷却信息。
         # （内存偏移 0x48 的 is_usable 语义模糊，可能把冷却中的卡也标成不可用。）
         lines.append("📋 卡片:")
-        if state.seeds:
-            for s in state.seeds:
+        # 过滤无效占位卡（plant_type<0）：它们不是真卡（传送带空槽/未初始化），
+        # 若按原样显示成 "未知(-1) (0☀) ✅"，模型会误以为有可用卡去 place_plant。
+        valid_seeds = [s for s in state.seeds if s.plant_type >= 0]
+        if valid_seeds:
+            for s in valid_seeds:
                 if s.cd > 0:
                     # 冷却中: 显示剩余秒数 (cd 是厘秒)
                     status = f"⏳{s.cd / 100:.1f}s"
@@ -780,7 +777,11 @@ class PvZStateReader:
                     f"  [{s.index}] {s.name} ({s.sun_cost}☀) {status}"
                 )
         else:
-            lines.append("  (无卡片数据)")
+            lines.append("  (空——很可能是传送带关卡)")
+            lines.append(
+                "  👉 传送带关卡：用 collect_belt 把传送带上的植物收进卡片栏"
+                "（可连续收多张），再用 place_plant 种下"
+            )
 
         lines.append("")
 

@@ -158,6 +158,13 @@ def build_planner_tools_text() -> list[dict]:
             ["card_index"],
         ),
         _tool_spec(
+            "collect_belt",
+            "传送带关卡专用：把传送带上堆积的植物收进卡片栏（count=想收几张，默认 3）。"
+            "看到【卡片】段显示\"空——很可能是传送带关卡\"时调用；收完再看【卡片】列表用 place_plant 种下。",
+            {"count": {"type": "integer", "description": "想收取的张数（默认 3）"}},
+            [],
+        ),
+        _tool_spec(
             "select_seeds",
             "选卡界面：按**植物名字**选卡（seeds 填植物名列表，如 [\"向日葵\",\"豌豆射手\"]，也可用类型id）。系统会自动选择并点开始按钮。每个选卡会话只能选一次。",
             {
@@ -210,13 +217,16 @@ def build_planner_system_text(cfg: AppConfig) -> str:
 
 ## 工具
 直接调用原生工具（不要输出 <tool_call> 或任何文本格式的工具调用）：
-place_plant / shovel / click_card / select_seeds / win_level / wait / terminate / answer。
+place_plant / shovel / click_card / collect_belt / select_seeds / win_level / wait / terminate / answer。
 
 ## 规则（简短）
 0. **每轮必须调用至少一个工具**：直接调用上面的工具；严禁只返回文本/思考而不调用工具。
    暂时没有可种/可铲/可点的就调用 wait 等待，需要结束才 terminate，需要向用户开口才 answer。
 1. 战斗内用 place_plant 种植物：只能种【内存状态】里标为"可用"的卡片（冷却结束且阳光足够）。
    阳光不够就 wait。已有植物的格子不能叠种（除了花盆，南瓜壳这类特殊植物）；升级植物必须种在对应的基础植物上。
+2. **传送带关卡**：若【卡片】段显示"空——很可能是传送带关卡"，用 collect_belt 把传送带上的
+   植物收进卡片栏（可连续收多张，如 count=5），收到后立即用 place_plant 种下；之后再要植物就继续 collect_belt。
+   传送带关阳光不足时同样 wait 等天上掉的阳光。
 2. 改变状态后可以 wait(1~2)。单轮可连续调用多个工具（执行多个种植动作时不要种同一个卡片的植物）。
 3. 连续失败 2 次换目标，别重复种同一格子。
 4. 僵尸有威胁时优先在其所在行种植物防御；尽量把植物种在左侧（如(0,1),(1,2)等），而不是僵尸面前，灰烬植物除外，需要尽可能放到僵尸处。
@@ -254,6 +264,7 @@ def build_planner_system_text_xml(cfg: AppConfig) -> str:
 - place_plant(card_index,row,col) 种植（内存注入）
 - shovel(row,col) 铲除
 - click_card(card_index) 只选中卡片
+- collect_belt(count) 传送带关：把传送带上的植物收进卡片栏（count=想收几张，默认 3）
 - select_seeds(seeds) 选卡（seeds=植物库索引列表，如 [0,1]）
 - win_level() 直接通关
 - wait(time) 等待
@@ -265,6 +276,8 @@ def build_planner_system_text_xml(cfg: AppConfig) -> str:
    暂时没有可种/可铲/可点的就 wait，需要结束才 terminate，需要向用户开口才 answer。
 1. 战斗内用 place_plant：只能种【内存状态】里标为"可用"的卡片（冷却结束且阳光足够）。
    阳光不够就 wait。已有植物的格子不能叠种；升级植物必须种在对应的基础植物上。
+2. **传送带关卡**：若【卡片】段显示"空——很可能是传送带关卡"，用 collect_belt 把传送带上的
+   植物收进卡片栏（可连续收多张，如 count=5），收到后立即用 place_plant 种下；之后再要植物就继续 collect_belt。
 2. 改变状态后可以 wait(1~2)。单轮可连续输出多个 <tool_call>（执行多个种植动作时不要种同一个卡片的植物）。
 3. 连续失败 2 次换目标，别重复种同一格子。
 4. 僵尸有威胁时优先在其所在行种植物防御；尽量把植物种在左侧（如(0,1),(1,2)等），而不是僵尸面前，灰烬植物除外，需要尽可能放到僵尸处。
