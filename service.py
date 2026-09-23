@@ -331,6 +331,9 @@ class PvZAgentService:
         self._last_action_at = 0.0
         self._step_count = 0
         self._last_turn_time = 0.0
+        self._text_round_no = 0                      # 决策轮序号（日志用）
+        self._plan_worker: threading.Thread | None = None   # 决策看门狗工作线程
+        self._plan_abandoned = False                 # 上一轮是否因超时被放弃
 
         # 故障上报节流
         self._empty_rounds = 0                       # 连续无动作轮数
@@ -1392,12 +1395,91 @@ class PvZAgentService:
         )
 
         # 3. 文本 LLM 规划（include_image=False，不传图）
-        calls, raw = self._plan_tick("", user_text)
+        self._text_round_no += 1
+        round_no = self._text_round_no
+        t0 = time.perf_counter()
+        self._logger.info("[pvz-agent] 决策轮 #%d 开始（上一轮间隔 %.1fs）", round_no, elapsed)
+        calls, raw = self._plan_tick_guarded(user_text)
+        if calls is None and raw is None and getattr(self, "_plan_abandoned", False):
+            # 看门狗超时：本轮放弃（循环继续，接口恢复后自动接上）
+            return
+        round_secs = time.perf_counter() - t0
         if calls is None:
+            self._logger.warning(
+                "[pvz-agent] 决策轮 #%d 失败（耗时 %.1fs，接口异常已重试）", round_no, round_secs
+            )
             return
         if self._stop_evt.is_set():
             return
+        self._logger.info(
+            "[pvz-agent] 决策轮 #%d 完成: 耗时 %.1fs, %d 个动作 (%s)",
+            round_no, round_secs, len(calls),
+            ", ".join(c.get("name", "?") for c in calls) or "无",
+        )
+        if round_secs > 25.0:
+            # 决策太慢会表现为"长时间无动静"——让用户在面板上看见原因
+            self._notify_throttled(
+                f"[PVZ] 本轮决策耗时 {round_secs:.0f}s（接口较慢），游戏节奏会受影响。",
+                kind="planner_error", cooldown=60.0,
+            )
         self._execute_and_feedback(calls, raw, cfg)
+
+    # 决策看门狗：超过该秒数即放弃本轮等待（底层 HTTP 有自己的超时/重试，
+    # 接口挂起时最坏 120s×2——不设看门狗的话整个游玩循环会冻死同样长的时间）
+    _PLAN_DEADLINE_SECONDS = 90.0
+
+    def _plan_tick_guarded(self, user_text: str):
+        """带看门狗的规划：阻塞调用放进工作线程，主循环最多等 _PLAN_DEADLINE_SECONDS。
+
+        - 超时 → 记日志 + 面板提示，返回 (None, None) 并置 _plan_abandoned；
+        - 上一轮工作线程还活着 → 跳过本轮（避免线程堆积），返回 (None, None)。
+        """
+        self._plan_abandoned = False
+        worker = getattr(self, "_plan_worker", None)
+        if worker is not None and worker.is_alive():
+            self._logger.warning("[pvz-agent] 上一轮决策仍在进行，跳过本轮（接口可能挂起）")
+            self._notify_throttled(
+                "[PVZ] 上一轮决策还没返回（接口可能挂起），已跳过本轮等待恢复。",
+                kind="planner_error", cooldown=30.0,
+            )
+            return None, None
+
+        box: dict[str, Any] = {}
+
+        def _run() -> None:
+            try:
+                calls, raw = self._planner.plan("", user_text)
+                box["calls"], box["raw"] = calls, raw
+            except Exception as exc:  # 异常交给原有 _plan_tick 语义之外：直接记 None
+                box["error"] = f"{type(exc).__name__}: {exc}"
+
+        t = threading.Thread(target=_run, name="pvz-plan-worker", daemon=True)
+        self._plan_worker = t
+        t.start()
+        t.join(self._PLAN_DEADLINE_SECONDS)
+        if t.is_alive():
+            self._plan_abandoned = True
+            self._logger.warning(
+                "[pvz-agent] 决策超过 %.0fs 未返回，放弃本轮等待（工作线程仍在后台跑）",
+                self._PLAN_DEADLINE_SECONDS,
+            )
+            self._notify_throttled(
+                f"[PVZ] 决策接口超过 {self._PLAN_DEADLINE_SECONDS:.0f}s 没有响应，"
+                "已放弃本轮；若持续请检查决策模型接口。",
+                kind="planner_error", cooldown=30.0,
+            )
+            return None, None
+        if "error" in box:
+            with self._lock:
+                self._last_error = str(box["error"])
+            self._logger.warning("[pvz-agent] 执行核心规划失败: %s", box["error"])
+            self._notify_throttled(
+                f"[PVZ] 决策引擎调用失败（{box['error']}）。已在重试。",
+                kind="planner_error", cooldown=30.0,
+            )
+            self._sleep_interruptible(2)
+            return None, None
+        return box.get("calls"), box.get("raw")
 
     def _plan_tick(self, img_b64: str, user_text: str):
         """规划一次（两种模式共用错误处理）；失败返回 (None, None)。"""
@@ -1449,6 +1531,11 @@ class PvZAgentService:
             results.append(result)
             if result.get("status") == "error":
                 self._logger.warning("[pvz-agent] %s 失败: %s", tc.name, result.get("error", ""))
+            else:
+                detail = result.get("detail") or result.get("summary") or ""
+                self._logger.info(
+                    "[pvz-agent] %s 执行成功%s", tc.name, f"（{detail}）" if detail else ""
+                )
             fail_key = self._fail_key(tc, result)
             if fail_key is not None:
                 if fail_key == self._last_fail_key:
