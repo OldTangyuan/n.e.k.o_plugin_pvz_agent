@@ -293,10 +293,22 @@ class PvZExecutor:
             raise ValueError(f"无效卡片序号: {card_index}，共 {len(state.seeds)} 张卡")
 
         seed = state.seeds[card_index]
-        if not seed.is_ready:
-            raise ValueError(f"卡片 [{card_index}] {seed.name} 未就绪 (冷却中或不可用)")
+        # 就绪判定只看冷却——is_usable(0x48) 语义模糊（读取器注释同理），
+        # 传送带关卡收进的卡该标志常为 False，按它拦会造成"显示✅却种不下"。
+        if seed.cd > 0:
+            raise ValueError(f"卡片 [{card_index}] {seed.name} 冷却中（还剩 {seed.cd / 100:.1f}s）")
         if state.sun < seed.sun_cost:
-            raise ValueError(f"卡片 [{card_index}] {seed.name} 需要 {seed.sun_cost} 阳光，当前只有 {state.sun}")
+            # 不再硬拦：内存阳光读数在部分版本/传送带关不可靠，交给游戏裁决
+            # （MouseClick 点不下就是真的不够）；仅附警告供模型知晓。
+            if self._injector and self._injector.supports_mouse:
+                result["warning"] = (
+                    f"阳光显示不足（当前 {state.sun}，卡 {seed.sun_cost}☀）——仍尝试种植，以游戏实际为准"
+                )
+            else:
+                # 直接注入 PutPlant 会手动扣阳光，读数不可靠时可能扣成负数，保持硬拦
+                raise ValueError(
+                    f"卡片 [{card_index}] {seed.name} 需要 {seed.sun_cost} 阳光，当前只有 {state.sun}"
+                )
 
         # 升级植物检查：必须点在已有基础植物上
         base_type = PLANT_UPGRADE_MAP.get(seed.plant_type)
@@ -331,6 +343,12 @@ class PvZExecutor:
                 # 注意: 绕过 UI 逻辑 (不重置冷却), 手动扣阳光。
                 plant_type = seed.imitator_type if seed.imitator_type >= 0 else seed.plant_type
                 imitater = seed.imitator_type >= 0
+                # 崩溃防护：类型必须已知——读内存偶发的垃圾类型直接注入
+                # PutPlant 会让游戏创建非法植物对象，可能直接闪退
+                if plant_type not in PLANT_NAMES:
+                    raise ValueError(
+                        f"卡片 [{card_index}] 的植物类型异常（{plant_type}），放弃直接注入以防崩溃"
+                    )
                 logger.info("[PvZ执行] 💉 非原版直接注入 PutPlant 行%s列%s type=%s imitater=%s",
                             row, col, plant_type, imitater)
                 self._injector.put_plant(row, col, plant_type, imitater=imitater,

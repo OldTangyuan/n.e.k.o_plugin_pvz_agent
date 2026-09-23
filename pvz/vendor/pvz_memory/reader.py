@@ -780,7 +780,8 @@ class PvZStateReader:
             lines.append("  (空——很可能是传送带关卡)")
             lines.append(
                 "  👉 传送带关卡：用 collect_belt 把传送带上的植物收进卡片栏"
-                "（可连续收多张），再用 place_plant 种下"
+                "（可连续收多张），再用 place_plant 种下。收进的卡即使显示"
+                "☀不足也可以尝试种植（部分版本传送带卡不吃阳光限制，以游戏实际为准）"
             )
 
         lines.append("")
