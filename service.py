@@ -1411,11 +1411,21 @@ class PvZAgentService:
             return
         if self._stop_evt.is_set():
             return
-        self._logger.info(
-            "[pvz-agent] 决策轮 #%d 完成: 耗时 %.1fs, %d 个动作 (%s)",
-            round_no, round_secs, len(calls),
-            ", ".join(c.get("name", "?") for c in calls) or "无",
-        )
+
+        try:
+            def _call_label(c: Any) -> str:
+                # calls 元素是 ToolCall 对象（不是 dict）——按对象属性取，兜底字典
+                if isinstance(c, dict):
+                    return str(c.get("name") or "?")
+                return str(getattr(c, "name", "?") or "?")
+
+            self._logger.info(
+                "[pvz-agent] 决策轮 #%d 完成: 耗时 %.1fs, %d 个动作 (%s)",
+                round_no, round_secs, len(calls),
+                ", ".join(_call_label(c) for c in calls) or "无",
+            )
+        except Exception:
+            pass  # 日志自身的任何问题都不允许杀死决策轮（4731a1e 教训）
         if round_secs > 25.0:
             # 决策太慢会表现为"长时间无动静"——让用户在面板上看见原因
             self._notify_throttled(
