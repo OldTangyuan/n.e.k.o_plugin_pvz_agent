@@ -363,6 +363,9 @@ class PvZExecutor:
                 result["direct"] = True
             else:
                 # 注入模式: MouseClick 点卡片 + 点格子
+                # 0. 取消滞留光标：手上有植物时，选卡/落格都会被污染
+                self._cancel_cursor()
+
                 # 1. 点卡片中心
                 if seed.x > 0 and seed.y > 0:
                     card_cx = seed.x + seed.width // 2
@@ -382,9 +385,9 @@ class PvZExecutor:
                 self._injector.mouse_click(gx, gy)
 
                 # 3. 种后确认：注入成功 ≠ 游戏种下。读内存验证目标格；
-                #    未种下就补点格子（把可能挂在鼠标上的植物点下去）。
+                #    未种下就完整重做（取消光标→选卡→落格）。
                 #    传送带（及部分版本）拾取时不要阳光、落格时才扣——阳光不足
-                #    游戏会拒绝落格，植物滞留鼠标上；此时补足阳光再补点。
+                #    游戏会拒绝落格，植物滞留鼠标上；此时补足阳光再重做。
                 time.sleep(0.7)
                 retries = 0
                 sun_granted = False
@@ -398,9 +401,13 @@ class PvZExecutor:
                             last_sun = self._safe_sun()
                     retries += 1
                     logger.info(
-                        "[PvZ执行] ⚠ 格子 行%s列%s 未确认种下（内存阳光=%s），补点第 %s 次",
+                        "[PvZ执行] ⚠ 格子 行%s列%s 未确认种下（内存阳光=%s），完整重做第 %s 次",
                         row, col, last_sun, retries,
                     )
+                    # 完整重做：取消可能滞留的旧光标 → 重新选卡 → 重新落格
+                    self._cancel_cursor()
+                    self._injector.mouse_click(card_cx, card_cy)
+                    time.sleep(0.4)
                     self._injector.mouse_click(gx, gy)
                     time.sleep(0.9)
                 if not self._cell_occupied(row, col):
@@ -539,6 +546,26 @@ class PvZExecutor:
         except Exception:
             return -1
 
+    def _cancel_cursor(self) -> None:
+        """取消可能滞留在鼠标上的植物/铲子（双保险）。
+
+        用户实测：传送带关植物会挂在鼠标上，此时点卡片选不中新卡、
+        点格子种下去的是光标上的旧卡——所有后续点击都被污染。
+        - 右键空角落 (5,5)：PvZ 标准取消操作，手中无物时无副作用
+        - release_mouse：游戏内部取消选中函数
+        """
+        if not self._injector:
+            return
+        try:
+            self._injector.mouse_click(5, 5, button=2)
+        except Exception:
+            pass
+        try:
+            self._injector.release_mouse()
+        except Exception:
+            pass
+        time.sleep(0.15)
+
     def _grant_sun(self, target: int) -> None:
         """把阳光补到 target——种植确认失败且阳光不足时的解卡手段。
 
@@ -627,9 +654,8 @@ class PvZExecutor:
             want = 3
         want = max(1, min(want, 10))
 
-        # 先释放可能持有的卡片/铲子光标，避免点击落空
-        self._injector.release_mouse()
-        time.sleep(0.05)
+        # 先取消可能滞留在鼠标上的植物/铲子光标，避免点击落空
+        self._cancel_cursor()
 
         collected: list[int] = []   # 本次收到的卡（在卡栏中的序号）
         gained_rounds = 0           # 校验计数成功的收取次数（不依赖名字读取）
@@ -668,6 +694,10 @@ class PvZExecutor:
             if fresh:
                 collected.append(fresh[-1][0])
             time.sleep(0.3)
+
+        # 扫描结束必做：最后一次点击可能把栏内卡拾上了鼠标（拾取时栏数量
+        # 不变，双向校验探测不到），右键取消防止植物滞留鼠标
+        self._cancel_cursor()
 
         if gained_rounds:
             if collected:
