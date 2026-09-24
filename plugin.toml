@@ -1,8 +1,8 @@
-[plugin]
+﻿[plugin]
 id = "pvz_agent"
 name = "PVZ Agent"
 description = "让猫娘自己玩《植物大战僵尸》"
-version = "0.3.0"
+version = "0.4.0"
 entry = "plugin.plugins.pvz_agent:PVZAgentPlugin"
 
 [plugin.author]
