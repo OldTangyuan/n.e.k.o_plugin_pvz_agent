@@ -633,8 +633,11 @@ class PvZExecutor:
 
         collected: list[int] = []   # 本次收到的卡（在卡栏中的序号）
         gained_rounds = 0           # 校验计数成功的收取次数（不依赖名字读取）
+        picked_back = 0             # 误拾卡片栏卡后放回的次数
         for _ in range(want):
             base = self._valid_seed_count()
+            if base >= 10:
+                break  # 卡片栏已满，没有收集空间
             gained = False
             for gx, gy in self._BELT_CLICK_POINTS:
                 self._injector.mouse_click(gx, gy)
@@ -643,6 +646,17 @@ class PvZExecutor:
                 if base >= 0 and now > base:
                     gained = True
                     break
+                if base >= 0 and now < base:
+                    # 数量减少 = 这一焦点到的是卡片栏槽位，把栏里的卡拾上了鼠标
+                    # （扫描点与卡片栏区域重叠）。原点再点一次放回去，
+                    # 否则植物会一直挂在鼠标上——正是"植物卡在鼠标"的根因。
+                    self._injector.mouse_click(gx, gy)
+                    time.sleep(0.2)
+                    picked_back += 1
+                    logger.info(
+                        "[PvZ执行] ⚠ 扫描点(%s,%s)误拾卡片栏卡，已放回", gx, gy
+                    )
+                    continue
                 if base < 0:
                     # 校验不可用：点满一整轮就视为尽力而为
                     break
@@ -666,6 +680,8 @@ class PvZExecutor:
                     f"从传送带收到 {gained_rounds} 张卡（种类读取失败，"
                     "以下一轮【内存状态】的【卡片】列表为准）"
                 )
+            if picked_back:
+                result["detail"] += f"（期间误拾栏内卡 {picked_back} 次已自动放回）"
         else:
             result["detail"] = (
                 "传送带上暂时没有可收取的植物（队列空或卡片栏已满）。"
