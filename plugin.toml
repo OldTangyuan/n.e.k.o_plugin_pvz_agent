@@ -1,4 +1,4 @@
-﻿[plugin]
+[plugin]
 id = "pvz_agent"
 name = "PVZ Agent"
 description = "让猫娘自己玩《植物大战僵尸》"
