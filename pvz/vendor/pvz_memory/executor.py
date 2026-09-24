@@ -576,7 +576,11 @@ class PvZExecutor:
                     "以下一轮【内存状态】的【卡片】列表为准）"
                 )
         else:
-            result["detail"] = "传送带上没有可收取的植物（队列空或卡片栏已满）"
+            result["detail"] = (
+                "传送带上暂时没有可收取的植物（队列空或卡片栏已满）。"
+                "不要干等：先种植卡片栏已有的植物（☀不足也照样种）；"
+                "若卡片栏也空，下一轮再 collect_belt 重试（传送带每隔几秒会送来新植物）"
+            )
 
     def _mem_read_valid_seeds(self) -> list[tuple[int, int]]:
         """读当前有效卡片 [(槽位序号, 植物类型)]，collect_belt 反馈用。"""
