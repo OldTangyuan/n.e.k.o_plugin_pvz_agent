@@ -334,6 +334,7 @@ class PvZAgentService:
         self._text_round_no = 0                      # 决策轮序号（日志用）
         self._plan_worker: threading.Thread | None = None   # 决策看门狗工作线程
         self._plan_abandoned = False                 # 上一轮是否因超时被放弃
+        self._belt_level_notified = False            # 本局是否已向主模型通报传送带关卡
 
         # 故障上报节流
         self._empty_rounds = 0                       # 连续无动作轮数
@@ -970,6 +971,7 @@ class PvZAgentService:
             self._stop_evt.clear()
             self._last_fail_key = None
             self._consecutive_fail = 0
+            self._belt_level_notified = False  # 新一局重新感知传送带关
             self._phase = self.PHASE_RUNNING
         if self._thread is None or not self._thread.is_alive():
             self._thread = threading.Thread(target=self._loop, name="pvz-agent-loop", daemon=True)
@@ -1378,6 +1380,10 @@ class PvZAgentService:
             self._sleep_interruptible(1.0)
             return
 
+        # 2.2 传送带关卡感知：战斗中卡片栏空 → 首次向主模型通报机制，
+        #     避免她按"先种向日葵攒阳光"的常规套路指挥/解说。
+        self._maybe_notify_belt_level(state)
+
         memory_text = self._memory_engine.read_state_text(
             state, fallback_grid=(cfg.layout.rows, cfg.layout.cols)
         )
@@ -1490,6 +1496,32 @@ class PvZAgentService:
             self._sleep_interruptible(2)
             return None, None
         return box.get("calls"), box.get("raw")
+
+    def _maybe_notify_belt_level(self, state: Any) -> None:
+        """战斗中卡片栏为空（传送带关特征）→ 首次向主模型通报一次关卡机制。
+
+        主模型只看截图，容易把传送带关当普通关解说/指挥（"先种向日葵"）。
+        本提示每次开始游玩最多推送一次（start 时复位）。
+        """
+        try:
+            seeds = list(getattr(state, "seeds", []) or [])
+            has_valid = any(getattr(s, "plant_type", -1) >= 0 for s in seeds)
+        except Exception:
+            return
+        with self._lock:
+            if has_valid:
+                return  # 卡片栏有真卡（普通关或已收取）→ 不打扰
+            already = self._belt_level_notified
+            self._belt_level_notified = True
+        if already:
+            return
+        self._notify_text(
+            "[PVZ] 传送带关卡提示：本关植物由传送带持续供给（卡片栏为空、无固定卡组），"
+            "不存在\"先种向日葵攒阳光\"的常规开局。后台执行核心会自动从传送带收取植物并种植；"
+            "给建议时请基于场上已有植物与僵尸，不要建议种植卡组里没有的植物。",
+            kind="no_action",
+        )
+        self._logger.info("[pvz-agent] 已向主模型通报传送带关卡机制")
 
     def _plan_tick(self, img_b64: str, user_text: str):
         """规划一次（两种模式共用错误处理）；失败返回 (None, None)。"""
