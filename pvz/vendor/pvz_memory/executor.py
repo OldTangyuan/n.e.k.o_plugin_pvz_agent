@@ -386,23 +386,23 @@ class PvZExecutor:
 
                 # 3. 种后确认：注入成功 ≠ 游戏种下。读内存验证目标格；
                 #    未种下就完整重做（取消光标→选卡→落格）。
-                #    传送带（及部分版本）拾取时不要阳光、落格时才扣——阳光不足
-                #    游戏会拒绝落格，植物滞留鼠标上；此时补足阳光再重做。
                 time.sleep(0.7)
                 retries = 0
-                sun_granted = False
-                last_sun = -1
                 while not self._cell_occupied(row, col) and retries < 3:
-                    if not sun_granted and seed.sun_cost > 0:
-                        last_sun = self._safe_sun()
-                        if 0 <= last_sun < seed.sun_cost:
-                            self._grant_sun(seed.sun_cost + 25)
-                            sun_granted = True
-                            last_sun = self._safe_sun()
                     retries += 1
+                    if retries == 1:
+                        # 实测该版本传送带卡的真实阳光消耗可能高于内存卡价
+                        # （坚果内存 50、阳光 50 仍被拒绝落格）——首次重做前
+                        # 大幅补阳光，把"阳光不够"从失败因素里彻底排除
+                        before = self._safe_sun()
+                        self._grant_sun(seed.sun_cost * 2 + 100)
+                        logger.info(
+                            "[PvZ执行] ☀ 补阳光 %s → %s（卡价=%s，排除阳光因素）",
+                            before, self._safe_sun(), seed.sun_cost,
+                        )
                     logger.info(
-                        "[PvZ执行] ⚠ 格子 行%s列%s 未确认种下（内存阳光=%s），完整重做第 %s 次",
-                        row, col, last_sun, retries,
+                        "[PvZ执行] ⚠ 格子 行%s列%s 未确认种下，完整重做第 %s 次",
+                        row, col, retries,
                     )
                     # 完整重做：取消可能滞留的旧光标 → 重新选卡 → 重新落格
                     self._cancel_cursor()
@@ -412,9 +412,8 @@ class PvZExecutor:
                     time.sleep(0.9)
                 if not self._cell_occupied(row, col):
                     result["warning"] = (
-                        f"格子 行{row}列{col} 点击后未在内存确认种植"
-                        f"（内存阳光={self._safe_sun()}）——"
-                        "植物可能仍挂在鼠标上，下轮请先检查该格状态"
+                        f"格子 行{row}列{col} 点击后未在内存确认种植（已补阳光并重做 3 次）——"
+                        "可能是该格无法种植或光标交互异常，下轮请换目标"
                     )
         else:
             self._place_plant_mouse(seed, row, col, state)
