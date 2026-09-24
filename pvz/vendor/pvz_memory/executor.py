@@ -293,6 +293,12 @@ class PvZExecutor:
             raise ValueError(f"无效卡片序号: {card_index}，共 {len(state.seeds)} 张卡")
 
         seed = state.seeds[card_index]
+        # 空槽位守卫：传送带关读到的 plant_type=-1 是空卡槽，点了也是无效操作
+        # （日志实证：模型对空槽发起种植，注入层报成功但什么都没发生）
+        if seed.plant_type < 0:
+            raise ValueError(
+                f"卡片 [{card_index}] 是空槽位（传送带尚未送来或已用完）——改用 collect_belt 收取新植物"
+            )
         # 就绪判定只看冷却——is_usable(0x48) 语义模糊（读取器注释同理），
         # 传送带关卡收进的卡该标志常为 False，按它拦会造成"显示✅却种不下"。
         if seed.cd > 0:
@@ -366,12 +372,31 @@ class PvZExecutor:
                     card_cy = 10
                 logger.info("[PvZ执行] 💉 点击卡片 [%s] (%s,%s)", seed.index, card_cx, card_cy)
                 self._injector.mouse_click(card_cx, card_cy)
-                time.sleep(0.1)
+                # 0.4s 等拾取动画：间隔太短时后续点击会被游戏吞掉，
+                # 表现为植物一直挂在鼠标上种不下去（传送带关高频出现）
+                time.sleep(0.4)
 
                 # 2. 点格子中心 (精确坐标)
                 gx, gy = self._injector.grid_to_pixel(row, col)
                 logger.info("[PvZ执行] 💉 点击格子 (%s,%s) → (%s,%s)", row, col, gx, gy)
                 self._injector.mouse_click(gx, gy)
+
+                # 3. 种后确认：注入成功 ≠ 游戏种下。读内存验证目标格；
+                #    未种下就补点格子（把可能挂在鼠标上的植物点下去）
+                time.sleep(0.7)
+                retries = 0
+                while not self._cell_occupied(row, col) and retries < 2:
+                    retries += 1
+                    logger.info(
+                        "[PvZ执行] ⚠ 格子 行%s列%s 未确认种下，补点第 %s 次", row, col, retries
+                    )
+                    self._injector.mouse_click(gx, gy)
+                    time.sleep(0.9)
+                if not self._cell_occupied(row, col):
+                    result["warning"] = (
+                        f"格子 行{row}列{col} 点击后未在内存确认种植——"
+                        "植物可能仍挂在鼠标上，下轮请先检查该格状态"
+                    )
         else:
             self._place_plant_mouse(seed, row, col, state)
 
@@ -494,6 +519,32 @@ class PvZExecutor:
         (120, 58), (170, 58), (220, 58), (270, 58), (320, 58), (390, 58),
         (120, 42), (170, 42), (220, 42), (120, 74), (170, 74), (220, 74),
     )
+
+    def _cell_occupied(self, row: int, col: int) -> bool:
+        """读内存判断格子上是否有植物（种植结果确认用）。读取失败按 False 处理。
+
+        与 reader._read_plants 同源的简化版：只比对 row/col，避免循环依赖。
+        """
+        try:
+            off = self._mem.offsets
+            mo = self._mem.main_object
+            plant_array = self._mem.read_pointer(mo + off.plant_array)
+            if not plant_array:
+                return False
+            count_max = self._mem.read_int(mo + off.plant_count_max)
+            for i in range(min(max(count_max, 0), 200)):
+                addr = plant_array + i * off.plant_struct_size
+                try:
+                    if self._mem.read_bool(addr + off.p_is_disappeared):
+                        continue
+                    if (self._mem.read_int(addr + off.p_row) == row
+                            and self._mem.read_int(addr + off.p_col) == col):
+                        return True
+                except Exception:
+                    break
+            return False
+        except Exception:
+            return False
 
     def _valid_seed_count(self) -> int:
         """读当前"有效卡片"数（plant_type>=0），供 collect_belt 收前/收后校验。
