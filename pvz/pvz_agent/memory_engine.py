@@ -22,6 +22,29 @@ from pvz_memory import PvZExecutor, PvZMemory, PvZStateReader
 from pvz_memory.reader import GameState
 
 
+class _LoggerBridgeHandler(logging.Handler):
+    """把 pvz_memory 命名空间的日志记录转发给任意 logger-like 对象。
+
+    不依赖目标对象的 ``.handlers`` 属性——宿主 SDK 的 file logger 可能是
+    自定义 wrapper（无 handlers），直接复制 handler 的做法会静默失效。
+    """
+
+    def __init__(self, target: Any) -> None:
+        super().__init__(level=logging.INFO)
+        self._target = target
+        self.setFormatter(logging.Formatter("%(name)s: %(message)s"))
+
+    def emit(self, record: logging.LogRecord) -> None:
+        try:
+            msg = self.format(record)
+            if record.levelno >= logging.WARNING:
+                self._target.warning("%s", msg)
+            else:
+                self._target.info("%s", msg)
+        except Exception:
+            pass
+
+
 class MemoryGameEngine:
     """内存驱动游戏运行时（纯文本模式）。"""
 
@@ -56,17 +79,17 @@ class MemoryGameEngine:
         self._wire_pvz_memory_logging()
 
     def _wire_pvz_memory_logging(self) -> None:
-        """把 pvz_memory 命名空间的日志挂到当前 logger 的 handler 上（幂等）。
+        """把 pvz_memory 命名空间的日志桥接进当前 logger（幂等）。
 
-        插件的文件 logger 由宿主 SDK 创建，handler 已带文件输出；
-        pvz_memory 的模块 logger 默认没有 handler，INFO 细节全部丢失。
+        pvz_memory 的模块 logger（注入动作/传送带收取/种植验证）默认没有
+        handler，排障时完全不可见。用桥接 handler 转发，兼容任意 logger
+        实现（stdlib Logger / SDK wrapper 均可）。
         """
         try:
             pvz_logger = logging.getLogger("pvz_memory")
             pvz_logger.setLevel(logging.INFO)
-            for h in self._logger.handlers:
-                if h not in pvz_logger.handlers:
-                    pvz_logger.addHandler(h)
+            if not any(isinstance(h, _LoggerBridgeHandler) for h in pvz_logger.handlers):
+                pvz_logger.addHandler(_LoggerBridgeHandler(self._logger))
             pvz_logger.propagate = False  # 避免重复输出
         except Exception:
             pass  # 日志接线失败不影响主流程

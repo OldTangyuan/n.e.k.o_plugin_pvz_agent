@@ -382,19 +382,31 @@ class PvZExecutor:
                 self._injector.mouse_click(gx, gy)
 
                 # 3. 种后确认：注入成功 ≠ 游戏种下。读内存验证目标格；
-                #    未种下就补点格子（把可能挂在鼠标上的植物点下去）
+                #    未种下就补点格子（把可能挂在鼠标上的植物点下去）。
+                #    传送带（及部分版本）拾取时不要阳光、落格时才扣——阳光不足
+                #    游戏会拒绝落格，植物滞留鼠标上；此时补足阳光再补点。
                 time.sleep(0.7)
                 retries = 0
-                while not self._cell_occupied(row, col) and retries < 2:
+                sun_granted = False
+                last_sun = -1
+                while not self._cell_occupied(row, col) and retries < 3:
+                    if not sun_granted and seed.sun_cost > 0:
+                        last_sun = self._safe_sun()
+                        if 0 <= last_sun < seed.sun_cost:
+                            self._grant_sun(seed.sun_cost + 25)
+                            sun_granted = True
+                            last_sun = self._safe_sun()
                     retries += 1
                     logger.info(
-                        "[PvZ执行] ⚠ 格子 行%s列%s 未确认种下，补点第 %s 次", row, col, retries
+                        "[PvZ执行] ⚠ 格子 行%s列%s 未确认种下（内存阳光=%s），补点第 %s 次",
+                        row, col, last_sun, retries,
                     )
                     self._injector.mouse_click(gx, gy)
                     time.sleep(0.9)
                 if not self._cell_occupied(row, col):
                     result["warning"] = (
-                        f"格子 行{row}列{col} 点击后未在内存确认种植——"
+                        f"格子 行{row}列{col} 点击后未在内存确认种植"
+                        f"（内存阳光={self._safe_sun()}）——"
                         "植物可能仍挂在鼠标上，下轮请先检查该格状态"
                     )
         else:
@@ -519,6 +531,34 @@ class PvZExecutor:
         (120, 58), (170, 58), (220, 58), (270, 58), (320, 58), (390, 58),
         (120, 42), (170, 42), (220, 42), (120, 74), (170, 74), (220, 74),
     )
+
+    def _safe_sun(self) -> int:
+        """读当前内存阳光；失败返回 -1（不阻塞种植流程）。"""
+        try:
+            return int(self._mem.get_sun())
+        except Exception:
+            return -1
+
+    def _grant_sun(self, target: int) -> None:
+        """把阳光补到 target——种植确认失败且阳光不足时的解卡手段。
+
+        传送带等版本拾取植物不要阳光、落格时才扣：阳光不足则游戏拒绝落格，
+        植物滞留鼠标。写入走注入器句柄（PvZMemory 句柄只读）。失败仅记日志。
+        """
+        inj = self._injector
+        if not inj:
+            return
+        try:
+            a = inj._addrs
+            board_ptr = self._mem.read_pointer(a.pvz_base + a.board_offset)
+            if not board_ptr:
+                logger.warning("[PvZ执行] Board* 为空，无法补阳光")
+                return
+            sun_addr = board_ptr + self._mem.offsets.sun
+            inj.write_int(sun_addr, int(target))
+            logger.info("[PvZ执行] ☀ 阳光补至 %s（落格被拒的解卡处理）", target)
+        except Exception as exc:
+            logger.warning("[PvZ执行] 补阳光失败: %s", exc)
 
     def _cell_occupied(self, row: int, col: int) -> bool:
         """读内存判断格子上是否有植物（种植结果确认用）。读取失败按 False 处理。
