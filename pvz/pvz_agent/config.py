@@ -445,8 +445,15 @@ def load_config(plugin_cfg: dict | None = None) -> AppConfig:
     # 窗口精确标题：优先新键 window_titles，兼容旧键 window_title_keywords。
     raw_titles = jcfg.get("window_titles", jcfg.get("window_title_keywords", AppConfig().window_titles))
 
-    # 运行模式：优先新键 mode，兼容旧值；非法值回退 "vision"。
-    _mode = str(jcfg.get("mode", "vision") or "vision").strip().lower()
+    # 运行模式：以 plugin.toml [pvz_agent] 的 mode 为准（运行时实际使用的模式），
+    # 缺省回退 config.json 的 mode；非法值回退 "vision"。
+    # 只读 config.json 会导致"插件填 text、config.json 留 vision"时校验错对象
+    # （只填 text_api_* 却被要求填 api_key）。
+    _pc_mode = str(_pc.get("mode", "") or "").strip().lower()
+    if _pc_mode in ("vision", "text"):
+        _mode = _pc_mode
+    else:
+        _mode = str(jcfg.get("mode", "vision") or "vision").strip().lower()
     if _mode not in ("vision", "text"):
         _mode = "vision"
 

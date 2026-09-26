@@ -593,6 +593,9 @@ class PvZAgentService:
         cfg.card_scan.enabled = bool(cfg.card_scan.enabled) and self._scan_cards_enabled
         # 插件级 tool_call_mode 覆盖 config.json（默认 regex=简化正则）
         cfg.tool_call_mode = self._tool_call_mode
+        # 插件级 mode 覆盖 config.json：插件 runtime 的模式以 plugin.toml 为准，
+        # 否则 cfg.mode 与真实运行模式不一致（核心内按 cfg.mode 选 VLM 配置）。
+        cfg.mode = self._mode
         self._cfg = cfg
 
         # 纯文本模式：读内存获取状态 + 注入执行，不用 OpenCV/视觉模型。
