@@ -335,6 +335,8 @@ class PvZAgentService:
         self._plan_worker: threading.Thread | None = None   # 决策看门狗工作线程
         self._plan_abandoned = False                 # 上一轮是否因超时被放弃
         self._belt_level_notified = False            # 本局是否已向主模型通报传送带关卡
+        self._last_sig_game_mode: int | None = None  # 关卡特征标定：上次记录的 game_mode
+        self._last_sig_game_ui: int | None = None    # 关卡特征标定：上次记录的 game_ui
 
         # 故障上报节流
         self._empty_rounds = 0                       # 连续无动作轮数
@@ -975,6 +977,8 @@ class PvZAgentService:
             self._last_fail_key = None
             self._consecutive_fail = 0
             self._belt_level_notified = False  # 新一局重新感知传送带关
+            self._last_sig_game_mode = None    # 新一局重记关卡特征
+            self._last_sig_game_ui = None
             self._phase = self.PHASE_RUNNING
         if self._thread is None or not self._thread.is_alive():
             self._thread = threading.Thread(target=self._loop, name="pvz-agent-loop", daemon=True)
@@ -1386,6 +1390,9 @@ class PvZAgentService:
         # 2.2 传送带关卡感知：战斗中卡片栏空 → 首次向主模型通报机制，
         #     避免她按"先种向日葵攒阳光"的常规套路指挥/解说。
         self._maybe_notify_belt_level(state)
+        # 2.3 关卡特征标定：game_mode 变化时落一行日志（为"传送带/普通/教程"
+        #     硬判别收集真实特征值；判别落地后此日志保留作排障依据）。
+        self._log_level_signature(state)
 
         memory_text = self._memory_engine.read_state_text(
             state, fallback_grid=(cfg.layout.rows, cfg.layout.cols)
@@ -1499,6 +1506,27 @@ class PvZAgentService:
             self._sleep_interruptible(2)
             return None, None
         return box.get("calls"), box.get("raw")
+
+    def _log_level_signature(self, state: Any) -> None:
+        """game_mode 变化时落一行关卡特征日志（传送带/普通/教程硬判别的标定数据）。
+
+        每种 game_mode 只记一次（跨关变化才记）；异常静默（纯观测，不影响游玩）。
+        """
+        try:
+            mode = int(getattr(state, "game_mode", -1) or -1)
+            ui = int(getattr(state, "game_ui", -1) or -1)
+            seeds = [int(getattr(s, "plant_type", -1)) for s in (getattr(state, "seeds", []) or [])]
+            sun = int(getattr(state, "sun", -1) or -1)
+        except Exception:
+            return
+        with self._lock:
+            if mode == self._last_sig_game_mode and ui == self._last_sig_game_ui:
+                return
+            self._last_sig_game_mode, self._last_sig_game_ui = mode, ui
+        self._logger.info(
+            "[pvz-agent] 关卡特征标定: game_mode=%s game_ui=%s sun=%s 卡槽类型=%s",
+            mode, ui, sun, seeds[:10],
+        )
 
     def _maybe_notify_belt_level(self, state: Any) -> None:
         """战斗中卡片栏为空（传送带关特征）→ 首次向主模型通报一次关卡机制。
