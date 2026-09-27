@@ -293,10 +293,23 @@ class PvZStateReader:
         首次战斗观测同时转储卡槽组头部 10 个 int（bank头），为后续按内存
         结构精确判别做标定。
         """
-        if _as_int(getattr(state, "game_ui", -1)) != 3:
+        ui = _as_int(getattr(state, "game_ui", -1))
+        if ui not in (2, 3):
             self._conveyor_verdict = None
             self._last_slot_types = None
             return None
+        if ui == 2:
+            # ui==2 两义：选卡界面（关卡之间）或个别特殊关卡的"战斗中"。
+            # 用场上实体区分：无植物且无僵尸 = 不在关卡界面 → 按用户实测
+            # 要求，此时刷新本关判定（否则传送带判定会残留到下一个关卡，
+            # 表现为换关后无限免费种植 + 传送带横幅残留）。特殊关卡的
+            # "ui=2 但战斗中"场上必有实体，不受影响。
+            if not getattr(state, "plants", None) and not getattr(state, "zombies", None):
+                if self._conveyor_verdict is not None or self._last_slot_types is not None:
+                    logger.info("[PvZ] 已离开关卡界面（选卡/过场），刷新关卡判定与动态证据")
+                self._conveyor_verdict = None
+                self._last_slot_types = None
+            return self._conveyor_verdict
         types = [_as_int(getattr(s, "plant_type", -1)) for s in (getattr(state, "seeds", []) or [])]
         if self._conveyor_verdict is None:
             self._conveyor_verdict = level_is_conveyor(state)

@@ -202,8 +202,11 @@ class PvZExecutor:
             self._conveyor_flag = None
             self._direct_plants = 0
             return None
-        if ui != 3:
-            # ui==2：选卡界面或个别特殊关卡的"战斗中"——保留已有判定
+        if ui == 2:
+            # 选卡界面（关卡之间，场上无实体）→ 刷新本关状态，防跨关残留
+            if not getattr(state, "plants", None) and not getattr(state, "zombies", None):
+                self._conveyor_flag = None
+                self._direct_plants = 0
             return self._conveyor_flag
         if self._conveyor_flag is None:
             self._conveyor_flag = level_is_conveyor(state)
@@ -446,13 +449,12 @@ class PvZExecutor:
         time.sleep(0.3)
         if self._cell_occupied(row, col):
             self._direct_plants += 1
-            # 冷却写回只对"卡槽全满"（普通关卡组固定特征）执行：
-            # 传送带/教程关卡槽有空位，写满冷却会把常驻卡人为冻住
-            # （实测传送带关坚果被写 30s 冷却 → 模型无卡可种 → 一直 wait）
-            bar_full = all(
-                getattr(s, "plant_type", -1) >= 0 for s in (getattr(state, "seeds", []) or [])
-            )
-            if not conveyor and bar_full:
+            # 冷却写回：凡非传送带判定关都写。传送带卡自带保护——其
+            # sc_initial_cd 读出为 0（实测日志从无冷却写回行），被
+            # initial_cd>0 守卫天然跳过，不会冻卡。此前"卡槽全满才写"
+            # 的条件是错的：普通关选卡少于 10 张时卡槽本就有空位，
+            # 导致小喷菇等卡不进冷却、可无限连种（用户实测）。
+            if not conveyor:
                 self._write_card_cd_full(card_index)
             result["detail"] = f"种植 {seed.name} 到 行{row}列{col} (直接注入)"
         else:
