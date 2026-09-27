@@ -1,0 +1,41 @@
+# 用户配置覆盖（深合并覆盖 plugin.toml 的同名键）——模板文件。
+#
+# 用法：复制本文件为 profiles/default.toml 后填写。
+#   profiles/default.toml 已被 .gitignore 排除（用户本地文件），
+#   在这里填的密钥不会被提交进仓库。
+# 面板里保存的插件配置也会由宿主/插件写入 profiles/default.toml。
+# 可用环境变量 NEKO_PLUGIN_PVZ_AGENT_PROFILE 切换其他 profile。
+
+[pvz_agent]
+
+# ── AI 决策服务（OpenAI 兼容接口）──
+# vision / text 两种模式共用地址与密钥；text 可单独覆盖模型/地址/密钥。
+api_base_url = ""   # 如 "https://api.example.com/v1"
+api_model = ""      # 模型名
+api_key = ""        # 服务密钥（填在这里，不会进仓库）
+text_api_base_url = ""
+text_api_model = ""
+text_api_key = ""
+
+# ── 运行方式 ──
+# mode = "text"              # "text"=纯文本内存(推荐) / "vision"=OpenCV 视觉
+# planting_mode = "mouseclick"  # "mouseclick"=模拟鼠标点击(推荐) / "putplant"=PutPlant 直注
+# tool_call_mode = "fc"      # "fc"=原生函数调用 / "regex"=简化正则
+# auto_start = false
+# agent_controls_seed_selection = false
+
+# ── 思考参数（预设值见 pvz/pvz_agent/vlm.py THINKING_EXTRA_BODY_PRESETS）──
+# thinking = ""              # 视觉模式；""=服务端默认
+# text_thinking = ""         # 纯文本模式
+
+# ── 观察通道 ──
+# screenshot_feed_enabled = true
+# screenshot_feed_interval = 8.0
+# screenshot_nudge_enabled = true
+# screenshot_nudge_interval = 5.0
+
+# ── 游戏识别与操作 ──
+# sun_auto_collect = true
+# scan_grid_enabled = true
+# scan_cards_enabled = true
+# card_position_mode = "opencv"

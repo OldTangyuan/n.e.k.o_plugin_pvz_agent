@@ -35,7 +35,7 @@ class VLMConfig:
     retries: int = 2
     retry_delay: float = 1.0
     timeout: float = 120.0
-    thinking: str = ""                   # 推理控制：""(默认)/"disabled"(关闭思维链，加快响应)
+    thinking: str = ""                   # 推理控制：预设值查 vlm.THINKING_EXTRA_BODY_PRESETS（DS/Kimi/qwen/OpenAI 原生/Claude/Gemini/OpenRouter），""=服务端默认，未知值不发送
     tool_choice: str = "required"        # 原生工具选择策略："auto"(可不用工具)/"required"(强制每轮调用)/"none"
 
 

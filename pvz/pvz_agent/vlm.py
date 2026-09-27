@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import json
 import time
 from typing import Any
@@ -13,6 +14,39 @@ from .config import VLMConfig
 
 class VLMError(RuntimeError):
     """VLM 调用失败。"""
+
+
+# 思考参数预设：thinking 配置值 → 请求 extra_body。
+# 各家思维链参数不统一（DS/Kimi 用 thinking.type，旧版 OpenAI 兼容/qwen/silicon 用
+# enable_thinking，OpenAI 原生用 reasoning_effort，Anthropic 用 thinking.type 的
+# enabled/blocked 变体，Gemini 2.5/3 走 google.thinking_config，OpenRouter 用
+# reasoning.effort）。按 provider 选对应预设，避免"DS 参数发给其他模型报参数错误"。
+THINKING_EXTRA_BODY_PRESETS: dict[str, dict[str, Any]] = {
+    # DS / Kimi（thinking.type 字段；亦为本插件 0.3.0 之前的默认行为）
+    "disabled": {"thinking": {"type": "disabled"}},
+    "enabled": {"thinking": {"type": "enabled"}},
+    # 旧版 OpenAI 兼容字段（enable_thinking；qwen / silicon 等）
+    "openai": {"enable_thinking": False},
+    "openai_thinking": {"enable_thinking": True},
+    # OpenAI 原生 reasoning_effort
+    "openai_native": {"reasoning_effort": "none"},
+    "openai_native_thinking": {"reasoning_effort": "low"},
+    "openai_native_minimal": {"reasoning_effort": "minimal"},
+    "openai_native_minimal_thinking": {"reasoning_effort": "low"},
+    # Anthropic 标准
+    "claude": {"thinking": {"type": "disabled"}},
+    "claude_thinking": {"thinking": {"type": "enabled"}},
+    # Gemini 2.5：budget 0 = 关；800 = 低固定预算（开思考但不深思）
+    "gemini": {"extra_body": {"google": {"thinking_config": {"thinking_budget": 0}}}},
+    "gemini_thinking": {"extra_body": {"google": {"thinking_config": {"thinking_budget": 800}}}},
+    # Gemini 3：思考档位保持最低(low)，include_thoughts 控制思考过程是否透出
+    # （thoughts 走独立字段，不混进 content）
+    "gemini_3": {"extra_body": {"google": {"thinking_config": {"thinking_level": "low", "include_thoughts": False}}}},
+    "gemini_3_thinking": {"extra_body": {"google": {"thinking_config": {"thinking_level": "low", "include_thoughts": True}}}},
+    # OpenRouter：effort none→low（开思考但取最低努力档）
+    "openrouter": {"reasoning": {"effort": "none"}},
+    "openrouter_thinking": {"reasoning": {"effort": "low"}},
+}
 
 
 class VLMClient:
@@ -35,18 +69,30 @@ class VLMClient:
         self.last_tool_parse: dict[str, Any] = {}
 
     def _request_kwargs(self) -> dict:
-        """构造请求附加参数（含可选的思维链控制）。
+        """构造请求附加参数（思考参数按 provider 预设映射为 extra_body）。
 
-        - ``thinking="disabled"``：关闭推理（如 kimi-k2.5 默认开长思维链会拖慢，视觉模式常关）；
-        - ``thinking="enabled"``：强制开启推理（纯文本模式默认开，让模型多思考再决策）；
-        - 其它值：不传 extra_body，交给模型/服务端默认。
+        ``thinking`` 配置值查 ``THINKING_EXTRA_BODY_PRESETS``：
+
+        - ``""``（默认）：不传 extra_body，交给模型/服务端默认；
+        - 预设值（如 ``"disabled"``/``"openai"``/``"claude"``/``"gemini"``/``"openrouter"``
+          及对应 ``*_thinking`` 变体）：发送该 provider 的思维链参数；
+        - 未知值：**不发送任何参数**并打印提示（避免把 DS 的参数发给其他
+          provider 导致"参数错误"整轮失败）。
         """
         kw: dict = {}
         thinking = (self.cfg.thinking or "").strip().lower()
-        if thinking == "disabled":
-            kw["extra_body"] = {"thinking": {"type": "disabled"}}
-        elif thinking == "enabled":
-            kw["extra_body"] = {"thinking": {"type": "enabled"}}
+        if not thinking:
+            return kw
+        preset = THINKING_EXTRA_BODY_PRESETS.get(thinking)
+        if preset is None:
+            print(
+                f"[VLM] 未知的 thinking 预设 {thinking!r}，本次请求不携带思维链参数。"
+                f"可选值：{', '.join(sorted(THINKING_EXTRA_BODY_PRESETS))}"
+            )
+            return kw
+        # 深拷贝：预设含嵌套 dict（thinking.type / google.thinking_config 等），
+        # 浅拷贝仍会与调用方共享嵌套对象，改坏一次就污染整个预设模板。
+        kw["extra_body"] = copy.deepcopy(preset)
         return kw
 
     # ------------------------------------------------------------------ #

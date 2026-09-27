@@ -19,6 +19,10 @@ store.db
 .env
 .DS_Store
 
+# 用户配置覆盖（面板保存的密钥写在这里，绝不进仓库；模板除外）
+profiles/*.toml
+!profiles/default.example.toml
+
 # 插件内置原生依赖必须随市场包分发（上面的 *.py[cod] 会误伤 .pyd，负向排除）
 !pvz/vendor/**/*.pyd
 !pvz/vendor/**/*.dll
