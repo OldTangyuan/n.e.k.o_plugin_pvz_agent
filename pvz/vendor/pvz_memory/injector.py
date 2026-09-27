@@ -1073,18 +1073,21 @@ class PvZCodeInjector:
         """手动扣除阳光.
 
         PutPlant 内部函数只创建植物对象，不走 UI 逻辑，不扣阳光。
-        阳光地址: [[PVZ_BASE] + BOARD_OFFSET] + sun_offset
+        阳光地址: MainObject + sun_offset（走 mem.main_object 缓存——与
+        reader 同源的正确两级链 [[PVZ_BASE]+board] ；此前直接
+        read_pointer(PVZ_BASE全局地址+board) 少一次解引用，恒得 0，
+        导致"种植后阳光不减"）。
         """
         try:
-            board_ptr = self._mem.read_pointer(self._addrs.pvz_base + self._addrs.board_offset)
-            if board_ptr == 0:
+            board_ptr = self._mem.main_object
+            if not board_ptr:
                 logger.warning("[注入] Board* 为空，无法扣阳光")
                 return
             sun_addr = board_ptr + self._mem.offsets.sun
             current_sun = self._mem.read_int(sun_addr)
             new_sun = max(0, current_sun - cost)
             self.write_int(sun_addr, new_sun)
-            logger.debug("[注入] 阳光 %s → %s (-%s)", current_sun, new_sun, cost)
+            logger.info("[注入] 阳光 %s → %s (-%s)", current_sun, new_sun, cost)
         except Exception as exc:
             logger.warning("[注入] 扣除阳光失败: %s", exc)
 

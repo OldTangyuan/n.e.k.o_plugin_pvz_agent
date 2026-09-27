@@ -358,14 +358,15 @@ class PvZExecutor:
         if seed.cd > 0:
             raise ValueError(f"卡片 [{card_index}] {seed.name} 冷却中（还剩 {seed.cd / 100:.1f}s）")
         if state.sun < seed.sun_cost:
-            # 不再硬拦：内存阳光读数在部分版本/传送带关不可靠，交给游戏裁决
-            # （MouseClick 点不下就是真的不够）；仅附警告供模型知晓。
-            if self._injector and self._injector.supports_mouse:
+            # 传送带关（鼠标模拟）：交给游戏裁决（MouseClick 点不下就是真的
+            # 不够），仅附警告供模型知晓；其余路径（直接注入 PutPlant——含
+            # 教程/普通冒险关，以及 pyautogui 兜底）按 3.0 语义硬拦：
+            # PutPlant 不走 UI，手动扣阳光会把读数扣成 0，预检是唯一闸门。
+            if self._injector and self._conveyor_verdict(state) and self._injector.supports_mouse:
                 result["warning"] = (
                     f"阳光显示不足（当前 {state.sun}，卡 {seed.sun_cost}☀）——仍尝试种植，以游戏实际为准"
                 )
             else:
-                # 直接注入 PutPlant 会手动扣阳光，读数不可靠时可能扣成负数，保持硬拦
                 raise ValueError(
                     f"卡片 [{card_index}] {seed.name} 需要 {seed.sun_cost} 阳光，当前只有 {state.sun}"
                 )
@@ -640,8 +641,7 @@ class PvZExecutor:
         if not inj:
             return
         try:
-            a = inj._addrs
-            board_ptr = self._mem.read_pointer(a.pvz_base + a.board_offset)
+            board_ptr = self._mem.main_object
             if not board_ptr:
                 logger.warning("[PvZ执行] Board* 为空，无法补阳光")
                 return
