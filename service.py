@@ -1513,8 +1513,8 @@ class PvZAgentService:
         每种 game_mode 只记一次（跨关变化才记）；异常静默（纯观测，不影响游玩）。
         """
         try:
-            mode = int(getattr(state, "game_mode", -1) or -1)
-            ui = int(getattr(state, "game_ui", -1) or -1)
+            mode = int(getattr(state, "game_mode", -1))
+            ui = int(getattr(state, "game_ui", -1))
             seeds = [int(getattr(s, "plant_type", -1)) for s in (getattr(state, "seeds", []) or [])]
             sun = int(getattr(state, "sun", -1) or -1)
         except Exception:
@@ -1537,7 +1537,12 @@ class PvZAgentService:
         try:
             seeds = list(getattr(state, "seeds", []) or [])
             has_valid = any(getattr(s, "plant_type", -1) >= 0 for s in seeds)
+            mode = int(getattr(state, "game_mode", -1))
         except Exception:
+            return
+        if mode in (0, -1):
+            # 冒险模式（教程关/普通关，卡槽开局也可能空）与读取失败：
+            # 一律不按传送带通报——4.0 曾因此把教程关指挥成 collect_belt。
             return
         with self._lock:
             if has_valid:

@@ -24,6 +24,7 @@ import logging
 import math
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 from .memory import PvZMemory, PvZMemoryError
 from .offsets import (
@@ -36,6 +37,33 @@ from .offsets import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _as_int(value: Any, default: int = -1) -> int:
+    """宽容转 int（None/垃圾值 → default；保留 0，绝不用 `or` 折叠合法零值）。"""
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def level_is_conveyor(state: Any) -> bool:
+    """传送带关单次观测判定：卡槽全空 且 game_mode 非冒险/未知。
+
+    - game_mode 0 = 冒险模式（教程关/普通冒险关，绝不能按传送带处理——4.0 教训）；
+    - game_mode -1 = 读取失败（保守按普通关处理）；
+    - 其余模式 + 卡槽全空 = 传送带关。
+    卡槽非空恒 False。粘性（首战斗观测决定整关）由调用方维护——传送带关
+    收取后卡槽也有卡，单次观测会误判。
+    """
+    try:
+        for s in (getattr(state, "seeds", []) or []):
+            if _as_int(getattr(s, "plant_type", -1)) >= 0:
+                return False
+        mode = _as_int(getattr(state, "game_mode", -1))
+    except Exception:
+        return False
+    return mode not in (0, -1)
 
 
 # ================================================================== #
@@ -251,6 +279,31 @@ class PvZStateReader:
     def __init__(self, memory: PvZMemory, guide_dir: str | Path | None = None) -> None:
         self._mem = memory
         self._guide_dir = Path(guide_dir) if guide_dir else None
+        self._conveyor_verdict: bool | None = None  # 粘性传送带判定（战斗首观测决定）
+
+    def conveyor_verdict(self, state: Any) -> bool | None:
+        """粘性传送带判定：战斗中（game_ui==3）首次观测决定，非战斗重置。
+
+        返回 True=传送带关 / False=普通关 / None=尚未判定（非战斗）。
+        判定结果同时盖章到 state._is_conveyor——executor 在同一轮共享该
+        结论（executor 自己的首观测可能已晚于收取，卡槽非空会误判）。
+        """
+        if _as_int(getattr(state, "game_ui", -1)) != 3:
+            self._conveyor_verdict = None
+            return None
+        if self._conveyor_verdict is None:
+            self._conveyor_verdict = level_is_conveyor(state)
+            logger.info(
+                "[PvZ] 关卡路由判定: game_mode=%s 首观测卡槽=%s → %s",
+                _as_int(getattr(state, "game_mode", -1)),
+                [_as_int(getattr(s, "plant_type", -1)) for s in (getattr(state, "seeds", []) or [])][:10],
+                "传送带关（鼠标模拟）" if self._conveyor_verdict else "普通关（PutPlant 直接注入）",
+            )
+        try:
+            state._is_conveyor = self._conveyor_verdict
+        except Exception:
+            pass
+        return self._conveyor_verdict
 
     @staticmethod
     def _note_error(state: GameState, tag: str, exc: Exception) -> None:
@@ -777,12 +830,18 @@ class PvZStateReader:
                     f"  [{s.index}] {s.name} ({s.sun_cost}☀) {status}"
                 )
         else:
-            lines.append("  (空——很可能是传送带关卡)")
-            lines.append(
-                "  👉 传送带关卡：**禁止 wait 干等阳光**——立刻用 collect_belt 收取传送带植物"
-                "（可连续收多张），收到后同一轮 place_plant 种下；收进的卡显示☀不足也照样种"
-                "（以游戏实际为准）"
-            )
+            if self.conveyor_verdict(state):
+                lines.append("  (空——传送带关卡)")
+                lines.append(
+                    "  👉 传送带关卡：**禁止 wait 干等阳光**——立刻用 collect_belt 收取传送带植物"
+                    "（可连续收多张），收到后同一轮 place_plant 种下；收进的卡显示☀不足也照样种"
+                    "（以游戏实际为准）"
+                )
+            else:
+                lines.append(
+                    "  (空——等待游戏发卡或教程关自动给卡；这不是传送带关，不要 collect_belt，"
+                    "有卡后会显示在这里)"
+                )
 
         lines.append("")
 
