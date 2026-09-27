@@ -19,6 +19,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
 from typing import Any, Mapping
@@ -57,6 +58,59 @@ def _nonempty_str(v: Any) -> bool:
     if isinstance(v, str) and not v.strip():
         return False
     return True
+
+
+# ---------------------------------------------------------------------- #
+#  配置面板：配置项清单与 TOML 序列化（pvz_config_get / pvz_config_set）
+# ---------------------------------------------------------------------- #
+_CONFIG_ENUM_CHOICES: dict[str, tuple[str, ...]] = {
+    "mode": ("text", "vision"),
+    "planting_mode": ("mouseclick", "putplant"),
+    "tool_call_mode": ("regex", "fc"),
+    "card_position_mode": ("opencv", "fixed"),
+}
+_CONFIG_BOOL_KEYS = (
+    "auto_start", "agent_controls_seed_selection", "notify_on_terminate",
+    "notify_window_lost", "sun_auto_collect", "scan_grid_enabled",
+    "scan_cards_enabled", "screenshot_feed_enabled", "screenshot_nudge_enabled",
+)
+_CONFIG_FLOAT_RANGE: dict[str, tuple[float, float]] = {
+    "screenshot_feed_interval": (2.0, 300.0),
+    "screenshot_nudge_interval": (2.0, 300.0),
+}
+_CONFIG_INT_RANGE: dict[str, tuple[int, int]] = {
+    "screenshot_max_edge_px": (0, 4096),
+    "screenshot_jpeg_quality": (1, 95),
+}
+_CONFIG_STR_KEYS = (
+    "api_base_url", "api_model", "text_api_base_url", "text_api_model",
+    "thinking", "text_thinking", "screenshot_nudge_text",
+)
+_CONFIG_SECRET_KEYS = ("api_key", "text_api_key")
+
+
+def _toml_value_repr(value: Any) -> str:
+    """标量/字符串列表 → TOML 行内值。basic string 转义与 JSON 兼容
+    （引号/反斜杠/控制字符；JSON 的 \\uXXXX 转义在 TOML 里同样合法）。"""
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, (int, float)):
+        return repr(value)
+    if isinstance(value, str):
+        return json.dumps(value, ensure_ascii=False)
+    if isinstance(value, (list, tuple)):
+        return "[" + ", ".join(_toml_value_repr(v) for v in value) + "]"
+    return json.dumps(str(value), ensure_ascii=False)
+
+
+def _mask_secret(value: Any) -> str:
+    """密钥打码摘要：明文不出插件。"""
+    v = str(value or "").strip()
+    if not v:
+        return ""
+    if len(v) <= 8:
+        return "*" * len(v)
+    return f"{v[:4]}****{v[-4:]}"
 
 
 def merge_config_sources(
@@ -184,6 +238,75 @@ class PVZAgentPlugin(NekoPluginBase):
             return {"status": self._service.get_status()}
         except Exception:
             return {"status": {}}
+
+    @ui.context(id="config_panel", title="PVZ Agent 配置")
+    def config_panel_ui_context(self, **_):
+        """配置面板 surface 的上下文 provider（轻量快照；缺了同样必败）。"""
+        try:
+            return {"status": self._service.get_status(), "plugin_started": self._started}
+        except Exception:
+            return {"status": {}, "plugin_started": False}
+
+    def _read_env_fallback(self) -> dict[str, str]:
+        """读 pvz/.env（旧配置通道），只用于"密钥是否已设置"的探测。"""
+        try:
+            path = Path(__file__).resolve().parent / "pvz" / ".env"
+            if not path.exists():
+                return {}
+            out: dict[str, str] = {}
+            for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+                s = line.strip()
+                if not s or s.startswith("#") or "=" not in s:
+                    continue
+                k, _, v = s.partition("=")
+                out[k.strip()] = v.strip().strip('"').strip("'")
+            return out
+        except Exception:
+            return {}
+
+    def _write_profile_section(self, section: str, updates: JsonObject) -> Path:
+        """把 updates 合并进 profiles/default.toml 的 [section] 段（其余段原样保留）。
+
+        合并语义：先解析现有段的键值，updates 覆盖同名字段、保留未提及字段
+        （否则配置面板保存会抹掉教程面板先前保存的密钥）。写 profile 覆盖文件
+        而不是直接改 plugin.toml：仓库模板保持纯净（注释不被机器改写），且与
+        宿主 GUI 配置界面写的是同一个文件，两条通道互通。
+        """
+        root = Path(__file__).resolve().parent
+        path = root / "profiles" / "default.toml"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        lines = path.read_text(encoding="utf-8").splitlines() if path.exists() else []
+        existing: JsonObject = {}
+        if path.exists():
+            try:
+                parsed = tomllib.loads(path.read_text(encoding="utf-8"))
+                sec = parsed.get(section)
+                if isinstance(sec, dict):
+                    existing = dict(sec)
+            except Exception:
+                existing = {}  # 解析失败按空段处理（updates 仍会写入）
+        merged: JsonObject = {**existing, **updates}
+        block = [f"[{section}]"] + [f"{k} = {_toml_value_repr(v)}" for k, v in merged.items()]
+        out: list[str] = []
+        i = 0
+        replaced = False
+        while i < len(lines):
+            line = lines[i]
+            if line.strip() == f"[{section}]":
+                out.extend(block)
+                replaced = True
+                i += 1
+                while i < len(lines) and not lines[i].lstrip().startswith("["):
+                    i += 1
+                continue
+            out.append(line)
+            i += 1
+        if not replaced:
+            if out and out[-1].strip():
+                out.append("")
+            out.extend(block)
+        path.write_text("\n".join(out) + "\n", encoding="utf-8")
+        return path
 
     # ------------------------------------------------------------------ #
     #  内部辅助
@@ -549,3 +672,148 @@ class PVZAgentPlugin(NekoPluginBase):
     )
     async def pvz_scan(self, **_: Any):
         return await self._run_entry(lambda: self._neko.get_scan())
+
+    # ------------------------------------------------------------------ #
+    #  配置面板（hosted surface）：读取 / 保存 [pvz_agent] 配置
+    # ------------------------------------------------------------------ #
+    @ui.action(id="pvz_config_get", label="读取配置")
+    @plugin_entry(
+        id="pvz_config_get",
+        name="读取 PVZ 插件配置",
+        description="读取 [pvz_agent] 当前合并配置。密钥只回打码摘要，明文不出插件。",
+        llm_result_fields=["summary"],
+        input_schema={"type": "object", "properties": {}},
+        metadata={"agent_auto": False},
+    )
+    async def pvz_config_get(self, **_: Any):
+        async def _run():
+            cfg = dict(self._cfg or {})
+            data: JsonObject = {k: v for k, v in cfg.items() if k not in _CONFIG_SECRET_KEYS}
+            # 密钥：明文不出插件，回打码摘要 + 是否已设置（含 pvz/.env 回退探测）
+            env_vals = self._read_env_fallback()
+            merged_key = (
+                str(cfg.get("api_key", "") or "").strip()
+                or str(env_vals.get("VLM_API_KEY", "") or "").strip()
+            )
+            merged_text_key = (
+                str(cfg.get("text_api_key", "") or "").strip()
+                or str(env_vals.get("TEXT_VLM_API_KEY", "") or "").strip()
+            )
+            data["api_key_masked"] = _mask_secret(merged_key)
+            data["api_key_set"] = bool(merged_key)
+            data["text_api_key_masked"] = _mask_secret(merged_text_key)
+            data["text_api_key_set"] = bool(merged_text_key)
+            return {"config": data}
+
+        return await self._run_entry(_run)
+
+    @ui.action(id="pvz_config_set", label="保存配置")
+    @plugin_entry(
+        id="pvz_config_set",
+        name="保存 PVZ 插件配置",
+        description=(
+            "保存 [pvz_agent] 配置到 profiles/default.toml（与宿主 GUI 配置界面同一文件，"
+            "其余段原样保留）。密钥留空 = 不修改已保存值。保存后需重启插件生效。"
+        ),
+        llm_result_fields=["summary"],
+        input_schema={
+            "type": "object",
+            "properties": {
+                "mode": {"type": "string", "enum": ["text", "vision"]},
+                "planting_mode": {"type": "string", "enum": ["mouseclick", "putplant"]},
+                "tool_call_mode": {"type": "string", "enum": ["regex", "fc"]},
+                "card_position_mode": {"type": "string", "enum": ["opencv", "fixed"]},
+                "auto_start": {"type": "boolean"},
+                "agent_controls_seed_selection": {"type": "boolean"},
+                "notify_on_terminate": {"type": "boolean"},
+                "notify_window_lost": {"type": "boolean"},
+                "sun_auto_collect": {"type": "boolean"},
+                "scan_grid_enabled": {"type": "boolean"},
+                "scan_cards_enabled": {"type": "boolean"},
+                "screenshot_feed_enabled": {"type": "boolean"},
+                "screenshot_feed_interval": {"type": "number"},
+                "screenshot_nudge_enabled": {"type": "boolean"},
+                "screenshot_nudge_interval": {"type": "number"},
+                "screenshot_nudge_text": {"type": "string"},
+                "screenshot_max_edge_px": {"type": "integer"},
+                "screenshot_jpeg_quality": {"type": "integer"},
+                "window_titles": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "窗口标题关键词列表",
+                },
+                "api_base_url": {"type": "string"},
+                "api_model": {"type": "string"},
+                "api_key": {"type": "string", "description": "留空 = 不修改"},
+                "text_api_base_url": {"type": "string"},
+                "text_api_model": {"type": "string"},
+                "text_api_key": {"type": "string", "description": "留空 = 不修改"},
+                "thinking": {"type": "string"},
+                "text_thinking": {"type": "string"},
+            },
+        },
+        metadata={"agent_auto": False},
+    )
+    async def pvz_config_set(self, **values: Any):
+        async def _run():
+            updates: JsonObject = {}
+            skipped: list[str] = []
+            for key, val in values.items():
+                if key in _CONFIG_ENUM_CHOICES:
+                    s = str(val or "").strip().lower()
+                    if s in _CONFIG_ENUM_CHOICES[key]:
+                        updates[key] = s
+                    else:
+                        skipped.append(key)
+                elif key in _CONFIG_BOOL_KEYS:
+                    updates[key] = bool(val)
+                elif key in _CONFIG_FLOAT_RANGE:
+                    lo, hi = _CONFIG_FLOAT_RANGE[key]
+                    try:
+                        updates[key] = max(lo, min(hi, float(val)))
+                    except (TypeError, ValueError):
+                        skipped.append(key)
+                elif key in _CONFIG_INT_RANGE:
+                    lo, hi = _CONFIG_INT_RANGE[key]
+                    try:
+                        updates[key] = max(lo, min(hi, int(float(val))))
+                    except (TypeError, ValueError):
+                        skipped.append(key)
+                elif key == "window_titles":
+                    if isinstance(val, (list, tuple)):
+                        titles = [str(t).strip() for t in val if str(t).strip()]
+                    else:
+                        titles = [
+                            t.strip()
+                            for t in str(val or "").replace("，", ",").split(",")
+                            if t.strip()
+                        ]
+                    if titles:
+                        updates["window_titles"] = titles
+                    else:
+                        skipped.append(key)
+                elif key in _CONFIG_SECRET_KEYS:
+                    s = str(val or "").strip()
+                    if s:  # 留空 = 不修改已保存的密钥
+                        updates[key] = s
+                elif key in _CONFIG_STR_KEYS:
+                    updates[key] = str(val or "")
+                # 未知键静默忽略
+            if not updates:
+                return {
+                    "summary": "没有可保存的变更" + (f"（跳过: {', '.join(skipped)}）" if skipped else ""),
+                    "needs_restart": False,
+                    "skipped": skipped,
+                }
+            self._write_profile_section("pvz_agent", updates)
+            # 同步内存中的合并视图（pvz_config_get 立即反映；service 层重启后生效）
+            self._cfg = {**(self._cfg or {}), **updates}
+            secret_keys = [k for k in updates if k in _CONFIG_SECRET_KEYS]
+            summary = f"已保存 {len(updates)} 项到 profiles/default.toml"
+            if secret_keys:
+                summary += "（含密钥更新）"
+            if skipped:
+                summary += f"；跳过无效项: {', '.join(skipped)}"
+            return {"summary": summary, "needs_restart": True, "saved": sorted(updates)}
+
+        return await self._run_entry(_run)

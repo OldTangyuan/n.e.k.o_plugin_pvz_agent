@@ -4,9 +4,13 @@ import {
   Button,
   ButtonGroup,
   Card,
+  Field,
   Grid,
+  Input,
   KeyValue,
   Page,
+  PasswordInput,
+  Select,
   Stack,
   StatCard,
   Step,
@@ -19,7 +23,7 @@ import {
 } from "@neko/plugin-ui"
 import type { PluginSurfaceProps, Tone } from "@neko/plugin-ui"
 
-// PVZ 游玩助手插件面板「快速开始」教程。zh-CN 单语言（与插件现有中文文案一致）。
+// PVZ 游玩助手插件面板「快速开始」教程 + AI 服务配置表单。zh-CN 单语言。
 // 通过 props.api.call 调插件 entry（需在 __init__.py 用 @ui.action 暴露）。
 
 const STATUS_REFRESH_INTERVAL_MS = 5000
@@ -32,6 +36,29 @@ const PHASE_LABEL: Record<string, string> = {
   stopping: "停止中",
   error: "出错",
 }
+
+// 思考参数预设（与 pvz/pvz_agent/vlm.py 的 THINKING_EXTRA_BODY_PRESETS 一一对应）。
+// 各家思维链参数不统一，按模型选预设；选错 provider 也不会报"参数错误"
+// （插件端对未知值自动忽略）。
+const THINKING_OPTIONS: { value: string; label: string }[] = [
+  { value: "", label: "不发送思考参数（服务端默认）" },
+  { value: "disabled", label: "关闭思考 — DeepSeek / Kimi" },
+  { value: "enabled", label: "开启思考 — DeepSeek / Kimi" },
+  { value: "openai", label: "关闭思考 — qwen / silicon（旧版兼容）" },
+  { value: "openai_thinking", label: "开启思考 — qwen / silicon（旧版兼容）" },
+  { value: "openai_native", label: "关闭思考 — OpenAI 原生（reasoning_effort=none）" },
+  { value: "openai_native_thinking", label: "低档思考 — OpenAI 原生（reasoning_effort=low）" },
+  { value: "openai_native_minimal", label: "最小思考 — OpenAI 原生（reasoning_effort=minimal）" },
+  { value: "openai_native_minimal_thinking", label: "低档思考 — OpenAI 原生（minimal→low）" },
+  { value: "claude", label: "关闭思考 — Claude（Anthropic 标准）" },
+  { value: "claude_thinking", label: "开启思考 — Claude（Anthropic 标准）" },
+  { value: "gemini", label: "关闭思考 — Gemini 2.5（budget=0）" },
+  { value: "gemini_thinking", label: "低预算思考 — Gemini 2.5（budget=800）" },
+  { value: "gemini_3", label: "关闭思考 — Gemini 3（level=low，不透出过程）" },
+  { value: "gemini_3_thinking", label: "低档思考并透出过程 — Gemini 3（level=low）" },
+  { value: "openrouter", label: "关闭思考 — OpenRouter（effort=none）" },
+  { value: "openrouter_thinking", label: "低档思考 — OpenRouter（effort=low）" },
+]
 
 type StatusState = {
   loading: boolean
@@ -46,7 +73,37 @@ type StatusState = {
   goal: string
   error: string
   notRunning: boolean
-  pluginTomlPath: string
+}
+
+// 配置表单状态（api_key 输入框永远不回显已保存的明文，只显示打码摘要）。
+type ConfigState = {
+  loading: boolean
+  saving: boolean
+  apiBaseurl: string
+  apiModel: string
+  apiKeyInput: string
+  textApiModel: string
+  thinking: string
+  textThinking: string
+  keySet: boolean
+  keyMasked: string
+  message: string
+  error: string
+}
+
+const EMPTY_CONFIG: ConfigState = {
+  loading: false,
+  saving: false,
+  apiBaseurl: "",
+  apiModel: "",
+  apiKeyInput: "",
+  textApiModel: "",
+  thinking: "",
+  textThinking: "",
+  keySet: false,
+  keyMasked: "",
+  message: "",
+  error: "",
 }
 
 // 解包 hosted-surface action 返回的 envelope（{plugin_id, action_id, result}）。
@@ -72,8 +129,8 @@ export default function PvZAgentQuickstart(props: PluginSurfaceProps) {
     goal: "",
     error: "",
     notRunning: false,
-    pluginTomlPath: "",
   })
+  const [cfg, setCfg] = useState<ConfigState>(EMPTY_CONFIG)
   const refreshingRef = useRef(false)
   const selectingRef = useRef(false)
   const unmountedRef = useRef(false)
@@ -92,7 +149,6 @@ export default function PvZAgentQuickstart(props: PluginSurfaceProps) {
       const windows = (Array.isArray(data.windows) ? data.windows : [])
         .filter((w: any) => w && typeof w === "object")
         .map((w: any) => ({ hwnd: Number(w.hwnd), title: String(w.title || "") }))
-      const cfgPaths = data.config_paths && typeof data.config_paths === "object" ? data.config_paths : {}
       setState({
         loading: false,
         phase: String(data.phase || ""),
@@ -106,7 +162,6 @@ export default function PvZAgentQuickstart(props: PluginSurfaceProps) {
         goal: String(data.goal || ""),
         error: "",
         notRunning: false,
-        pluginTomlPath: String(cfgPaths.plugin_toml || ""),
       })
     } catch (exc: any) {
       if (unmountedRef.current) return
@@ -123,8 +178,64 @@ export default function PvZAgentQuickstart(props: PluginSurfaceProps) {
     }
   }
 
+  // 读取当前 AI 配置（密钥只拿打码摘要，明文永不出插件）。
+  const loadConfig = async () => {
+    setCfg((prev) => ({ ...prev, loading: true, error: "", message: "" }))
+    try {
+      const envelope = await props.api.call("pvz_config_get")
+      if (unmountedRef.current) return
+      const data = unwrapActionResult(envelope)
+      setCfg((prev) => ({
+        ...prev,
+        loading: false,
+        apiBaseurl: String(data.api_base_url || ""),
+        apiModel: String(data.api_model || ""),
+        textApiModel: String(data.text_api_model || ""),
+        thinking: String(data.thinking || ""),
+        textThinking: String(data.text_thinking || ""),
+        keySet: Boolean(data.key_set),
+        keyMasked: String(data.key_masked || ""),
+        apiKeyInput: "",
+      }))
+    } catch (exc: any) {
+      if (unmountedRef.current) return
+      setCfg((prev) => ({ ...prev, loading: false, error: String(exc?.message || exc) }))
+    }
+  }
+
+  // 保存：api_key 输入框留空 = 不修改已保存的密钥。
+  const saveConfig = async () => {
+    setCfg((prev) => ({ ...prev, saving: true, error: "", message: "" }))
+    try {
+      const envelope = await props.api.call("pvz_config_set", {
+        api_base_url: cfg.apiBaseurl,
+        api_model: cfg.apiModel,
+        api_key: cfg.apiKeyInput,
+        text_api_model: cfg.textApiModel,
+        thinking: cfg.thinking,
+        text_thinking: cfg.textThinking,
+      })
+      if (unmountedRef.current) return
+      const data = unwrapActionResult(envelope)
+      setCfg((prev) => ({
+        ...prev,
+        saving: false,
+        apiKeyInput: "",
+        keyMasked: String(data.key_masked || prev.keyMasked),
+        keySet: Boolean(data.key_masked) || prev.keySet,
+        message:
+          String(data.summary || "已保存") +
+          (data.needs_restart ? "（重启插件后生效）" : ""),
+      }))
+    } catch (exc: any) {
+      if (unmountedRef.current) return
+      setCfg((prev) => ({ ...prev, saving: false, error: String(exc?.message || exc) }))
+    }
+  }
+
   useEffect(() => {
     refresh()
+    loadConfig()
     const timer = window.setInterval(refresh, STATUS_REFRESH_INTERVAL_MS)
     return () => {
       unmountedRef.current = true
@@ -157,6 +268,72 @@ export default function PvZAgentQuickstart(props: PluginSurfaceProps) {
           插件当前未运行。请先在插件列表里启动「PVZ Agent」，再回来刷新状态。
         </Alert>
       ) : null}
+
+      <Card title="AI 服务配置（保存到 profile 覆盖文件，密钥不进仓库）">
+        <Stack>
+          <Field
+            label="AI 服务地址"
+            help="OpenAI 兼容接口地址；视觉 / 纯文本两种模式共用（示例：https://api.deepseek.com）"
+          >
+            <Input
+              value={cfg.apiBaseurl}
+              placeholder="https://api.example.com/v1"
+              onChange={(v: string) => setCfg((prev) => ({ ...prev, apiBaseurl: v }))}
+            />
+          </Field>
+          <Field label="模型名" help="vision / text 共用；纯文本想用别的模型时填下面那行">
+            <Input
+              value={cfg.apiModel}
+              placeholder="如 deepseek-chat / gpt-4o-mini"
+              onChange={(v: string) => setCfg((prev) => ({ ...prev, apiModel: v }))}
+            />
+          </Field>
+          <Field
+            label="AI 密钥"
+            help={
+              cfg.keySet
+                ? `已保存（${cfg.keyMasked}）。输入框留空 = 不修改；输入新值 = 覆盖。`
+                : "尚未设置。密钥保存在插件目录 profiles/default.toml（用户本地文件，已排除在仓库外）"
+            }
+          >
+            <PasswordInput
+              value={cfg.apiKeyInput}
+              placeholder={cfg.keySet ? "留空 = 不修改已保存的密钥" : "粘贴服务密钥（sk-...）"}
+              onChange={(v: string) => setCfg((prev) => ({ ...prev, apiKeyInput: v }))}
+            />
+          </Field>
+          <Field label="纯文本模式模型（可选）" help="留空 = 与上面模型名共用">
+            <Input
+              value={cfg.textApiModel}
+              placeholder="留空 = 共用上面的模型名"
+              onChange={(v: string) => setCfg((prev) => ({ ...prev, textApiModel: v }))}
+            />
+          </Field>
+          <Field label="思考参数（视觉模式）" help="按你用的模型选；选错 provider 也不会报参数错误">
+            <Select
+              value={cfg.thinking}
+              options={THINKING_OPTIONS}
+              onChange={(v: string) => setCfg((prev) => ({ ...prev, thinking: v }))}
+            />
+          </Field>
+          <Field label="思考参数（纯文本模式）" help="与视觉模式独立选择">
+            <Select
+              value={cfg.textThinking}
+              options={THINKING_OPTIONS}
+              onChange={(v: string) => setCfg((prev) => ({ ...prev, textThinking: v }))}
+            />
+          </Field>
+          {cfg.message ? <Alert tone="success">{cfg.message}</Alert> : null}
+          {cfg.error ? <Alert tone="danger">{cfg.error}</Alert> : null}
+          <ButtonGroup>
+            <Button onClick={loadConfig}>{cfg.loading ? "读取中…" : "重新读取"}</Button>
+            <Button onClick={saveConfig} tone={cfg.saving ? "default" : "primary"}>
+              {cfg.saving ? "保存中…" : "保存配置"}
+            </Button>
+          </ButtonGroup>
+          <Text>保存后需重启插件生效（插件列表里停止再启动）。</Text>
+        </Stack>
+      </Card>
 
       <Card title="游玩状态">
         <Stack>
@@ -218,10 +395,9 @@ export default function PvZAgentQuickstart(props: PluginSurfaceProps) {
             pvz/config.json 的 window_titles（保存即生效）。
           </Step>
           <Step index="2" title="配置 AI 决策">
-            在插件配置 **plugin.toml** 的 `[pvz_agent]` 段填三个键：`api_base_url`
-            （OpenAI 兼容接口地址）、`api_model`（模型名）、`api_key`（密钥）——
-            vision / text 两种模式共用这一组（路径见下方「配置文件位置」卡片）。
-            纯文本模式想用不同模型时，可另填 `text_api_model` 等覆盖。不配置则无法自主决策。
+            在本页顶部「AI 服务配置」卡片填写**服务地址 / 模型 / 密钥**并保存，
+            然后重启插件。vision / text 两种模式共用地址与密钥；思考参数按你用的
+            模型在下拉里选（DeepSeek / OpenAI / Claude / Gemini / OpenRouter 都有对应项）。
           </Step>
           <Step index="3" title="手动选卡后开始">
             默认**选卡由你手动操作**（agent_controls_seed_selection=false，选卡不触发 LLM）：
@@ -230,17 +406,6 @@ export default function PvZAgentQuickstart(props: PluginSurfaceProps) {
           </Step>
         </Steps>
       </Card>
-
-      {state.pluginTomlPath ? (
-        <Card title="配置文件位置（plugin.toml 在这里）">
-          <Text>在下面文件的 `[pvz_agent]` 段填写 AI 服务地址 / 模型 / 密钥（api_* 三个键）：</Text>
-          <Text>{state.pluginTomlPath}</Text>
-          <Text>
-            其它配置：`pvz/config.json`（核心行为/布局坐标）。旧版 `pvz/.env` 仍兼容读取，
-            但 plugin.toml 里的非空 api_* 值优先。
-          </Text>
-        </Card>
-      ) : null}
 
       <Card title="她会怎么做">
         <Text>
@@ -261,8 +426,7 @@ export default function PvZAgentQuickstart(props: PluginSurfaceProps) {
             window_titles（保存即生效）。
           </Step>
           <Step index="2" title="AI 决策未就绪">
-            说明还没配置 AI 决策：在插件配置 plugin.toml 的 [pvz_agent] 段填
-            `api_base_url` / `api_model` / `api_key`，保存后重启插件生效。
+            说明还没配置 AI 决策：在本页顶部「AI 服务配置」卡片填好并保存，重启插件。
           </Step>
           <Step index="3" title="纯文本模式提示“内存连接失败”">
             确认游戏已启动且为受支持的版本；刚启动游戏的话稍等片刻重试，或重启插件。
@@ -273,12 +437,9 @@ export default function PvZAgentQuickstart(props: PluginSurfaceProps) {
         </Steps>
       </Card>
 
-      <Card title="配置（plugin.toml [pvz_agent]）">
+      <Card title="其它配置（plugin.toml [pvz_agent]）">
         <KeyValue
           items={[
-            { key: "api_base_url", label: "AI 服务地址", value: "OpenAI 兼容接口，如 https://api.example.com/v1" },
-            { key: "api_model", label: "AI 模型", value: "vision / text 两种模式共用" },
-            { key: "api_key", label: "AI 密钥", value: "服务密钥；text_api_* 可选覆盖纯文本模式" },
             { key: "mode", label: "运行模式", value: '"text"=纯文本内存(默认) / "vision"=视觉' },
             { key: "agent_controls_seed_selection", label: "AgentB 操控选卡", value: "false(默认，手动选卡)" },
             { key: "tool_call_mode", label: "工具调用", value: '"fc"=原生函数调用 / "regex"=简化正则' },
@@ -291,14 +452,14 @@ export default function PvZAgentQuickstart(props: PluginSurfaceProps) {
       </Card>
 
       <Warning>
-        猫娘的 AI 决策需要能联网调用 AI 服务（在 plugin.toml 的 [pvz_agent] 段配置
-        api_key 等）。没配置时面板会显示“AI 决策未就绪”，点「开始游玩」会提示错误。
+        猫娘的 AI 决策需要能联网调用 AI 服务（在本页「AI 服务配置」卡片配置）。没配置时
+        面板会显示“AI 决策未就绪”，点「开始游玩」会提示错误。
       </Warning>
 
       <Alert tone="info">
         **纯文本模式已经可以用了**（mode="text"，当前默认）：不用视觉模型 / OpenCV，一切
         状态与触发靠读游戏内存（pvz/vendor/pvz_memory）——精确拿到阳光/卡片/植物/僵尸血量/
-        波次，用**纯文本 LLM** 决策（默认开启思考模式、更多上下文），动作走代码注入执行；
+        波次，用**纯文本 LLM** 决策，动作走代码注入执行；
         但**仍照常把游戏截图推给猫娘**供她看画面指挥。
         特点：LLM 思考期间不冻结游戏、窗口失焦也不暂停、非战斗界面不喂 LLM 只轮询等待。
         注意：使用受支持的游戏版本体验最佳。

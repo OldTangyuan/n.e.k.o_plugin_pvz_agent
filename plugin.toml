@@ -123,3 +123,12 @@ context = "quickstart"
 # action:call 授权 surface 通过 props.api.call 调插件 entry（pvz_get_status /
 # pvz_start / pvz_pause / pvz_stop，均需 @ui.action 暴露）。
 permissions = ["state:read", "action:call"]
+
+# 插件面板「配置面板」：全部 [pvz_agent] 配置项的表单（保存到
+# profiles/default.toml，与宿主 GUI 配置界面同一文件，重启插件生效）。
+[[plugin.ui.guide]]
+id = "config_panel"
+title = "配置面板"
+entry = "surfaces/config_panel.tsx"
+context = "config_panel"
+permissions = ["state:read", "action:call"]
