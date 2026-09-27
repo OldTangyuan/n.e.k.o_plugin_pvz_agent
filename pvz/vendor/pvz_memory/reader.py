@@ -280,30 +280,59 @@ class PvZStateReader:
         self._mem = memory
         self._guide_dir = Path(guide_dir) if guide_dir else None
         self._conveyor_verdict: bool | None = None  # 粘性传送带判定（战斗首观测决定）
+        self._last_slot_types: list[int] | None = None
 
     def conveyor_verdict(self, state: Any) -> bool | None:
-        """粘性传送带判定：战斗中（game_ui==3）首次观测决定，非战斗重置。
+        """粘性传送带判定（证据升级制）——判定结果盖章 state._is_conveyor。
 
-        返回 True=传送带关 / False=普通关 / None=尚未判定（非战斗）。
-        判定结果同时盖章到 state._is_conveyor——executor 在同一轮共享该
-        结论（executor 自己的首观测可能已晚于收取，卡槽非空会误判）。
+        1. 首观测：game_mode 非冒险(0)/未知(-1) 且 卡槽全空 → 传送带（小游戏类）；
+        2. 动态证据：任一卡槽的卡片**类型**在两次战斗观测间变化 → 传送带
+           （普通关卡卡组固定、类型永不变化；教程关只新增槽位不改已有类型）；
+        3. 其余维持普通关。冒险模式传送带关 game_mode=0（实测 1-5 坚果保龄球），
+           只能靠 2 升级识别。
+        首次战斗观测同时转储卡槽组头部 10 个 int（bank头），为后续按内存
+        结构精确判别做标定。
         """
         if _as_int(getattr(state, "game_ui", -1)) != 3:
             self._conveyor_verdict = None
+            self._last_slot_types = None
             return None
+        types = [_as_int(getattr(s, "plant_type", -1)) for s in (getattr(state, "seeds", []) or [])]
         if self._conveyor_verdict is None:
             self._conveyor_verdict = level_is_conveyor(state)
             logger.info(
-                "[PvZ] 关卡路由判定: game_mode=%s 首观测卡槽=%s → %s",
-                _as_int(getattr(state, "game_mode", -1)),
-                [_as_int(getattr(s, "plant_type", -1)) for s in (getattr(state, "seeds", []) or [])][:10],
-                "传送带关（鼠标模拟）" if self._conveyor_verdict else "普通关（PutPlant 直接注入）",
+                "[PvZ] 关卡路由判定(首观测): game_mode=%s 卡槽=%s bank头=%s → %s",
+                _as_int(getattr(state, "game_mode", -1)), types[:10], self._read_bank_header(),
+                "传送带关（不计阳光）" if self._conveyor_verdict else "普通关（PutPlant 直接注入，计阳光）",
             )
+        elif not self._conveyor_verdict and self._last_slot_types is not None:
+            for i, (cur, prev) in enumerate(zip(types, self._last_slot_types)):
+                if prev >= 0 and cur >= 0 and cur != prev:
+                    self._conveyor_verdict = True
+                    logger.info(
+                        "[PvZ] 关卡路由升级: 卡槽 %s 类型 %s→%s（普通关卡组类型不变）→ 传送带关（不计阳光）",
+                        i, prev, cur,
+                    )
+                    break
+        self._last_slot_types = types
         try:
             state._is_conveyor = self._conveyor_verdict
         except Exception:
             pass
         return self._conveyor_verdict
+
+    def _read_bank_header(self) -> list[int] | None:
+        """卡槽组（SeedBank）头部 10 个 int——传送带标定用，尽力而为。"""
+        try:
+            if not (self._mem and self._mem.main_object):
+                return None
+            off = self._mem.offsets
+            base = self._mem.read_pointer(self._mem.main_object + off.seed_array)
+            if not base:
+                return None
+            return [self._mem.read_int(base + i * 4) for i in range(10)]
+        except Exception:
+            return None
 
     @staticmethod
     def _note_error(state: GameState, tag: str, exc: Exception) -> None:
@@ -389,6 +418,15 @@ class PvZStateReader:
         except (PvZMemoryError, OSError, ValueError) as e:
             logger.debug("[PvZReader] 读取割草机失败: %s", e)
             self._note_error(state, "读取割草机", e)
+
+        # 传送带判定每轮无条件执行（盖章 state._is_conveyor 供 executor
+        # 共享）——动态证据（卡槽类型变化）依赖逐轮观测，不能只在文本
+        # 构建且卡槽为空时才调用，否则冒险传送带关（game_mode=0、卡槽
+        # 首观测非空）永远识别不出。
+        try:
+            self.conveyor_verdict(state)
+        except Exception as exc:
+            logger.debug("[PvZReader] 传送带判定异常: %s", exc)
 
         return state
 

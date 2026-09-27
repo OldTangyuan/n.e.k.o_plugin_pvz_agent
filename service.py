@@ -1529,24 +1529,16 @@ class PvZAgentService:
         )
 
     def _maybe_notify_belt_level(self, state: Any) -> None:
-        """战斗中卡片栏为空（传送带关特征）→ 首次向主模型通报一次关卡机制。
+        """reader 判定为传送带关 → 首次向主模型通报一次关卡机制。
 
         主模型只看截图，容易把传送带关当普通关解说/指挥（"先种向日葵"）。
         本提示每次开始游玩最多推送一次（start 时复位）。
+        与 reader 粘性判定对齐：冒险传送带关 game_mode=0（实测 1-5 坚果
+        保龄球），旧的"卡槽空+mode非冒险"启发式既漏判、又误伤教程关，弃用。
         """
-        try:
-            seeds = list(getattr(state, "seeds", []) or [])
-            has_valid = any(getattr(s, "plant_type", -1) >= 0 for s in seeds)
-            mode = int(getattr(state, "game_mode", -1))
-        except Exception:
-            return
-        if mode in (0, -1):
-            # 冒险模式（教程关/普通关，卡槽开局也可能空）与读取失败：
-            # 一律不按传送带通报——4.0 曾因此把教程关指挥成 collect_belt。
+        if getattr(state, "_is_conveyor", None) is not True:
             return
         with self._lock:
-            if has_valid:
-                return  # 卡片栏有真卡（普通关或已收取）→ 不打扰
             already = self._belt_level_notified
             self._belt_level_notified = True
         if already:
