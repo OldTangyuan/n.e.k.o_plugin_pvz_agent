@@ -145,6 +145,53 @@ def game_pixel_to_screen(
     return int(left + gx * scale_x), int(top + gy * scale_y)
 
 
+# 植物标准冷却（厘秒）——插件侧强制冷却的兜底值（快照 initial_cd 读不到时
+# 使用）。大部分植物为快速冷却 7.5s；长冷却按原版数值。
+_RECHARGE_CS: dict[int, int] = {
+    0: 750,   # 豌豆射手
+    1: 750,   # 向日葵
+    2: 5000,  # 樱桃炸弹（50s）
+    3: 3000,  # 坚果墙（30s）
+    4: 3000,  # 土豆雷（30s）
+    5: 750,   # 寒冰射手
+    6: 750,   # 双发射手
+    7: 750,   # 大喷菇
+    8: 750,   # 小喷菇
+    9: 750,   # 阳光菇
+    10: 3000, # 墓碑吞噬者（30s）
+    11: 3000, # 倭瓜（30s）
+    12: 750,  # 三线射手
+    13: 3000, # 缠绕海草（30s）
+    14: 5000, # 火爆辣椒（50s）
+    15: 750,  # 地刺
+    16: 750,  # 火炬树桩
+    17: 3000, # 高坚果（30s）
+    18: 3000, # 海蘑菇（30s）
+    19: 3000, # 路灯花（30s）
+    20: 750,  # 仙人掌
+    21: 750,  # 三叶草
+    22: 750,  # 裂荚射手
+    23: 750,  # 杨桃
+    24: 3000, # 南瓜头（30s）
+    25: 3000, # 磁力菇（30s）
+    26: 750,  # 卷心菜投手
+    27: 750,  # 花盆
+    28: 3000, # 玉米投手（30s）
+    29: 750,  # 咖啡豆
+    30: 2000, # 大蒜（20s）
+    31: 2000, # 伞叶（20s）
+    32: 750,  # 金盏花
+    33: 3000, # 西瓜投手（30s）
+    34: 5000, # 机枪射手（50s）
+    35: 5000, # 双子向日葵（50s）
+    36: 5000, # 忧郁菇（50s）
+    37: 5000, # 香蒲（50s）
+    38: 5000, # 冰瓜投手（50s）
+    39: 5000, # 黄金磁力菇（50s）
+    40: 5000, # 地刺王（50s）
+    41: 5000, # 玉米加农炮（50s）
+}
+
 # ================================================================== #
 #  PvZ 动作执行器
 # ================================================================== #
@@ -184,6 +231,10 @@ class PvZExecutor:
         # _direct_plants 供"疑似传送带漏判"阳光自愈使用（跨关时由时钟回卷重置）。
         self._direct_plants: int = 0  # 本关已成功直注次数
         self._last_clock: int = -1    # 上一动作的游戏时钟（回卷 = 换关）
+        # 插件侧冷却强制：卡号 → (monotonic 时刻, 冷却秒)。实测游戏的
+        # sc_initial_cd 会随卡槽数组迁移读到 0（写回失效），连种无冷却；
+        # 改为按植物标准冷却在插件侧封卡，任何内存布局下都有效。
+        self._card_ready_at: dict[int, float] = {}
 
     def _conveyor_verdict(self, state: Any) -> bool:
         """传送带判定：**逐轮纯推导**（level_is_conveyor），与 reader 完全一致。
@@ -361,6 +412,7 @@ class PvZExecutor:
             clock = 0
         if clock < self._last_clock:
             self._direct_plants = 0
+            self._card_ready_at = {}
         self._last_clock = clock
 
         if card_index is None or row is None or col is None:
@@ -444,6 +496,19 @@ class PvZExecutor:
             raise ValueError(
                 f"卡片 [{card_index}] 的植物类型异常（{plant_type}），放弃直接注入以防崩溃"
             )
+        # 插件侧冷却强制：游戏 sc_initial_cd 随卡槽数组迁移会读到 0
+        # （20:47 后从 750/2000 全变 0，写回失效），连种无冷却。此门限
+        # 按植物标准冷却封卡，不依赖内存布局。传送带关由喂卡节奏管理，
+        # 不受此门限影响。
+        if not conveyor:
+            ready_at = self._card_ready_at.get(card_index, 0.0)
+            now = time.monotonic()
+            if now < ready_at:
+                raise ValueError(
+                    f"卡片 [{card_index}]（{seed.name}）冷却中（插件侧限制，还剩 "
+                    f"{ready_at - now:.1f} 秒）——等待冷却或种植其他卡片"
+                )
+
         sun_cost = 0 if conveyor else seed.sun_cost
         logger.info("[PvZ执行] 💉 直接注入 PutPlant 行%s列%s type=%s imitater=%s 阳光=%s",
                     row, col, plant_type, imitater, sun_cost)
@@ -454,11 +519,12 @@ class PvZExecutor:
         time.sleep(0.3)
         if self._cell_occupied(row, col):
             self._direct_plants += 1
-            # 冷却写回：凡非传送带判定关都写。传送带卡自带保护——其
-            # sc_initial_cd 读出为 0（实测日志从无冷却写回行），被
-            # initial_cd>0 守卫天然跳过，不会冻卡。此前"卡槽全满才写"
-            # 的条件是错的：普通关选卡少于 10 张时卡槽本就有空位，
-            # 导致小喷菇等卡不进冷却、可无限连种（用户实测）。
+            # 插件侧冷却：按游戏标准冷却封卡。优先用快照 initial_cd
+            # （有值时与游戏一致），读不到（卡槽数组迁移）用静态表兜底。
+            recharge_cs = int(getattr(seed, "initial_cd", 0) or 0)
+            if recharge_cs <= 0:
+                recharge_cs = _RECHARGE_CS.get(plant_type, 750)
+            self._card_ready_at[card_index] = time.monotonic() + recharge_cs / 100.0
             if not conveyor:
                 self._write_card_cd_full(state, card_index)
             result["detail"] = f"种植 {seed.name} 到 行{row}列{col} (直接注入)"
