@@ -446,7 +446,13 @@ class PvZExecutor:
         time.sleep(0.3)
         if self._cell_occupied(row, col):
             self._direct_plants += 1
-            if not conveyor:
+            # 冷却写回只对"卡槽全满"（普通关卡组固定特征）执行：
+            # 传送带/教程关卡槽有空位，写满冷却会把常驻卡人为冻住
+            # （实测传送带关坚果被写 30s 冷却 → 模型无卡可种 → 一直 wait）
+            bar_full = all(
+                getattr(s, "plant_type", -1) >= 0 for s in (getattr(state, "seeds", []) or [])
+            )
+            if not conveyor and bar_full:
                 self._write_card_cd_full(card_index)
             result["detail"] = f"种植 {seed.name} 到 行{row}列{col} (直接注入)"
         else:

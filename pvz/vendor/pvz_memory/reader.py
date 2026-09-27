@@ -818,7 +818,13 @@ class PvZStateReader:
         lines: list[str] = []
 
         # ---- 基础信息 ----
-        lines.append(f"☀ 阳光: {state.sun}")
+        # 传送带判定由 read_state 每轮无条件执行并盖章；这里只读结论。
+        belt = self._conveyor_verdict is True
+        if belt:
+            lines.append("🏷 关卡类型: 传送带关——植物由传送带供给，**不计阳光**（阳光数字无视）")
+            lines.append("☀ 阳光: 不适用（传送带关没有阳光机制，卡可用就直接种，绝不要 wait）")
+        else:
+            lines.append(f"☀ 阳光: {state.sun}")
         # 游戏时钟（厘秒 → mm:ss），帮助模型判断节奏
         if state.game_clock > 0:
             _cs = state.game_clock // 100
@@ -857,7 +863,8 @@ class PvZStateReader:
                 if s.cd > 0:
                     # 冷却中: 显示剩余秒数 (cd 是厘秒)
                     status = f"⏳{s.cd / 100:.1f}s"
-                elif state.sun >= s.sun_cost:
+                elif belt or state.sun >= s.sun_cost:
+                    # 传送带关不计阳光——cd==0 即可种
                     status = "✅"
                 elif s.sun_cost > 0:
                     status = "☀不足"
@@ -880,6 +887,15 @@ class PvZStateReader:
                     "  (空——等待游戏发卡或教程关自动给卡；这不是传送带关，不要 collect_belt，"
                     "有卡后会显示在这里)"
                 )
+        if not belt and state.seeds and state.sun <= 0 and any(
+            getattr(s, "plant_type", -1) < 0 for s in state.seeds
+        ):
+            # 卡槽有空位 + 阳光归零：多半是传送带关漏判（阳光不会增长）。
+            # 不点破结论，只给行为指令——防止模型把"阳光 0"当成死局干等。
+            lines.append(
+                "  ⚠ 阳光为 0 且卡槽有空位：阳光可能不会增长——只要卡是 ✅ 就直接"
+                " place_plant（执行层会自动处理阳光），**绝不要因此 wait**"
+            )
 
         lines.append("")
 
