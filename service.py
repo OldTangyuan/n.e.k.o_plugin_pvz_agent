@@ -288,7 +288,8 @@ class PvZAgentService:
         # 插件级配置（configure 填充）
         self._mode = "text"                      # "vision"=OpenCV 视觉方案 / "text"=纯文本内存方案
         self._agent_selects_seeds = False        # 是否允许 AgentB 操控选卡（默认关）
-        self._tool_call_mode = "fc"             # "regex"=简化正则 / "fc"=原生函数调用
+        self._tool_call_mode = "fc"              # "regex"=简化正则 / "fc"=原生函数调用
+        self._planting_mode = "mouseclick"       # "mouseclick"=注入点击 / "putplant"=PutPlant 直注
         self._api_cfg: dict[str, str] = {}       # AI 服务配置（plugin.toml api_*，configure 填充）
         self._window_titles: list[str] = list(DEFAULT_WINDOW_TITLES)
         self._window_poll_interval: float = 1.0   # 等待窗口时的轮询间隔（秒）
@@ -360,6 +361,13 @@ class PvZAgentService:
             # 工具调用模式："regex" / "fc"（非法回退 "regex"）
             _tcm = str(plugin_cfg.get("tool_call_mode", "regex") or "regex").strip().lower()
             self._tool_call_mode = _tcm if _tcm in ("regex", "fc") else "regex"
+            # 种植模式："mouseclick"=注入 MouseClick 点卡片+点格子（0.3.0
+            # 主路线，游戏自管阳光/冷却/占用）；"putplant"=PutPlant 直接
+            # 注入（绕过 UI，需手动修补副作用；非原版游戏自动退化到此）。
+            _pm = str(plugin_cfg.get("planting_mode", "mouseclick") or "mouseclick").strip().lower()
+            self._planting_mode = _pm if _pm in ("mouseclick", "putplant") else "mouseclick"
+            if self._memory_engine is not None:
+                self._memory_engine.set_planting_mode(self._planting_mode)
             # 窗口精确标题：优先新键 window_titles，兼容旧键 window_title_keywords。
             _raw = plugin_cfg.get("window_titles") or plugin_cfg.get("window_title_keywords") or []
             self._window_titles = [
@@ -691,6 +699,7 @@ class PvZAgentService:
             return self._memory_engine
         if self._memory_engine is None:
             self._memory_engine = self._import_core().memory_engine.MemoryGameEngine(logger=self._logger)
+            self._memory_engine.set_planting_mode(getattr(self, "_planting_mode", "mouseclick"))
         if not self._memory_engine.connect():
             raise RuntimeError(self._memory_engine.error or "无法连接 PvZ 内存（需管理员权限 + 游戏已启动）")
         return self._memory_engine

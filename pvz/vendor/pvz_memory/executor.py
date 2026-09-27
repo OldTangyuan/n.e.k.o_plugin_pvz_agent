@@ -209,10 +209,16 @@ class PvZExecutor:
         self,
         memory: PvZMemory,
         get_client_rect: Callable[[], tuple[int, int, int, int]] | None = None,
+        planting_mode: str = "mouseclick",
     ) -> None:
         if not _IS_WINDOWS:
             raise PvZMemoryError("PvZ 动作执行仅支持 Windows 平台")
         self._mem = memory
+        # 种植模式："mouseclick"=注入 MouseClick 点卡片+点格子（0.3.0 主路线，
+        # 游戏自管阳光/冷却/占用，零副作用）；"putplant"=PutPlant 直接注入
+        # （绕过 UI，需手动修补副作用；非原版无 MouseClick 地址时的唯一选择）。
+        _pm = str(planting_mode or "mouseclick").strip().lower()
+        self._planting_mode = _pm if _pm in ("mouseclick", "putplant") else "mouseclick"
         if get_client_rect is None:
             get_client_rect = self._make_default_client_rect(memory)
         self._get_rect = get_client_rect
@@ -498,7 +504,7 @@ class PvZExecutor:
                     f"{ready_at - now:.1f} 秒）——等待冷却或种植其他卡片"
                 )
 
-        if self._injector is not None and self._injector.supports_mouse:
+        if self._injector is not None and self._injector.supports_mouse and self._planting_mode == "mouseclick":
             # ============ 主路线（0.3.0 实证零副作用）============
             # 注入 MouseClick 点卡片 + 点格子：游戏自己处理全部 UI 逻辑
             # （扣阳光/开冷却/查占用/阳光条冷却条显示），模型经 reader

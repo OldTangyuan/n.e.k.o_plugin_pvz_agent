@@ -74,9 +74,23 @@ class MemoryGameEngine:
         self._prev_in_select = False   # 上一轮是否处于选卡界面（用于检测新选卡会话）
         # 是否允许 AgentB 操控选卡界面（默认关：选卡场景不触发 LLM，由玩家手动选卡）。
         self._allow_seed_selection = False
+        # 种植模式："mouseclick"=注入 MouseClick 点卡片+点格子（默认，0.3.0
+        # 主路线，游戏自管阳光/冷却/占用）；"putplant"=PutPlant 直接注入
+        # （绕过 UI，需手动修补副作用；非原版游戏自动退化到此）。
+        self._planting_mode = "mouseclick"
         # 把 pvz_memory 内部日志（注入动作/传送带收取/读取诊断）路由进插件文件日志，
         # 否则 collect_belt、MouseClick、PutPlant 的细节在排障时完全不可见。
         self._wire_pvz_memory_logging()
+
+    def set_planting_mode(self, mode: str) -> None:
+        """设置种植模式（"mouseclick" / "putplant"），非法值回退 mouseclick。
+
+        configure 时调用；若执行器已存在（热更新配置）则同步应用到执行器。
+        """
+        _m = str(mode or "mouseclick").strip().lower()
+        self._planting_mode = _m if _m in ("mouseclick", "putplant") else "mouseclick"
+        if self._executor is not None:
+            self._executor._planting_mode = self._planting_mode
 
     def _wire_pvz_memory_logging(self) -> None:
         """把 pvz_memory 命名空间的日志桥接进当前 logger（幂等）。
@@ -108,7 +122,7 @@ class MemoryGameEngine:
         self._mem = mem
         self._reader = PvZStateReader(mem)
         try:
-            self._executor = PvZExecutor(mem)
+            self._executor = PvZExecutor(mem, planting_mode=self._planting_mode)
         except Exception as exc:
             self.error = f"PvZExecutor 初始化失败: {exc}"
             self._executor = None
