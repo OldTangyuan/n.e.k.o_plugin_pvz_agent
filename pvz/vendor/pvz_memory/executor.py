@@ -263,11 +263,13 @@ class PvZExecutor:
         except Exception:
             return False
 
-    def _write_card_cd_full(self, state: Any, card_index: int) -> None:
-        """PutPlant 绕过 UI：把卡槽冷却写满（sc_initial_cd → sc_cd），防止模型连种。
+    def _write_card_cd_full(self, state: Any, card_index: int, plant_type: int) -> None:
+        """PutPlant 绕过 UI：把卡槽冷却写满（sc_initial_cd → sc_cd），游戏内
+        冷却条照常显示，模型下一轮也能看到 ⏳。
 
-        initial_cd 取**本轮读取快照**（state.seeds[card_index].initial_cd，与
-        种植决策同源）而非重新读内存——实测重读会拿到 0 导致静默跳过。
+        initial_cd 优先取本轮快照（与种植决策同源）；实测快照可能为 0——
+        游戏只在冷却真正启动时才写该字段（手动点卡会写，PutPlant 绕过 UI
+        不触发），此时用植物标准冷却表兜底（20:43 前该写法实测有效）。
         写后回读验证：写不进去（卡槽数组被游戏迁移）会明确记日志。
         """
         if not (self._mem and self._injector):
@@ -278,7 +280,7 @@ class PvZExecutor:
                 return
             expected = int(getattr(seeds[card_index], "initial_cd", 0) or 0)
             if expected <= 0:
-                return
+                expected = _RECHARGE_CS.get(plant_type, 750)
             off = self._mem.offsets
             seed_array = self._mem.read_pointer(self._mem.main_object + off.seed_array)
             if not seed_array:
@@ -526,7 +528,7 @@ class PvZExecutor:
                 recharge_cs = _RECHARGE_CS.get(plant_type, 750)
             self._card_ready_at[card_index] = time.monotonic() + recharge_cs / 100.0
             if not conveyor:
-                self._write_card_cd_full(state, card_index)
+                self._write_card_cd_full(state, card_index, plant_type)
             result["detail"] = f"种植 {seed.name} 到 行{row}列{col} (直接注入)"
         else:
             result["warning"] = (
