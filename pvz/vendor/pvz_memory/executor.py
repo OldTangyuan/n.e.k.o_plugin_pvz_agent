@@ -180,47 +180,23 @@ class PvZExecutor:
             except Exception as exc:
                 self._inject_error = str(exc)
                 logger.warning("[PvZ执行] 代码注入器初始化失败: %s，退回鼠标模式", exc)
-        # 粘性关卡判定（reader 每轮盖章 state._is_conveyor，此处采信）：
-        # 判定只影响阳光策略/collect_belt 准入——种植一律 PutPlant 直接注入
-        # （实测传送带关直注与游戏状态自洽，传送带植物正常消耗）。
-        self._conveyor_flag: bool | None = None
-        self._direct_plants: int = 0  # 本关已成功直注次数（传送带漏判自愈用）
+        # 关卡判定：逐轮纯推导（见 _conveyor_verdict），无实例级缓存。
+        # _direct_plants 供"疑似传送带漏判"阳光自愈使用（跨关时由时钟回卷重置）。
+        self._direct_plants: int = 0  # 本关已成功直注次数
+        self._last_clock: int = -1    # 上一动作的游戏时钟（回卷 = 换关）
 
-    def _conveyor_verdict(self, state: Any) -> bool | None:
-        """粘性传送带判定：优先采信 reader 本轮盖章的 state._is_conveyor，
-        没有才自行判定并缓存（executor 首观测可能晚于收取，单看卡槽会误判）。"""
-        stamped = getattr(state, "_is_conveyor", None)
-        if stamped is not None:
-            self._conveyor_flag = bool(stamped)
-            return self._conveyor_flag
+    def _conveyor_verdict(self, state: Any) -> bool:
+        """传送带判定：**逐轮纯推导**（level_is_conveyor），与 reader 完全一致。
+
+        判 False 的冒险传送带关（mode=0，如 1-5 坚果保龄球）由 _belt_suspect
+        阳光自愈兜底（阳光耗尽+卡就绪 → 自动补阳光放行）。
+        """
+        verdict = level_is_conveyor(state)
         try:
-            ui = int(getattr(state, "game_ui", -1))
-        except (TypeError, ValueError):
-            ui = -1
-        if ui not in (2, 3):
-            # 主菜单/过场：重置本关判定
-            self._conveyor_flag = None
-            self._direct_plants = 0
-            return None
-        if ui == 2:
-            # 选卡界面（关卡之间，场上无实体）→ 刷新本关状态，防跨关残留
-            if not getattr(state, "plants", None) and not getattr(state, "zombies", None):
-                self._conveyor_flag = None
-                self._direct_plants = 0
-            return self._conveyor_flag
-        if self._conveyor_flag is None:
-            self._conveyor_flag = level_is_conveyor(state)
-            try:
-                bar = [int(getattr(s, "plant_type", -1)) for s in (getattr(state, "seeds", []) or [])]
-                mode = int(getattr(state, "game_mode", -1))
-            except (TypeError, ValueError):
-                bar, mode = [], -1
-            logger.info(
-                "[PvZ执行] 关卡路由判定: game_mode=%s 首观测卡槽=%s → %s",
-                mode, bar[:10],
-                "传送带关（不计阳光）" if self._conveyor_flag else "普通关（计阳光）",
-            )
-        return self._conveyor_flag
+            state._is_conveyor = verdict
+        except Exception:
+            pass
+        return verdict
 
     def _belt_suspect(self) -> bool:
         """疑似传送带漏判：本关已成功直注过且阳光已耗尽——传送带关没有
@@ -357,6 +333,15 @@ class PvZExecutor:
         card_index = args.get("card_index")
         row = args.get("row")
         col = args.get("col")
+
+        # 换关检测：游戏时钟回卷 = 新的一局 → 重置自愈计数
+        try:
+            clock = int(getattr(state, "game_clock", 0) or 0)
+        except (TypeError, ValueError):
+            clock = 0
+        if clock < self._last_clock:
+            self._direct_plants = 0
+        self._last_clock = clock
 
         if card_index is None or row is None or col is None:
             raise ValueError("place_plant 需要 card_index, row, col 参数")

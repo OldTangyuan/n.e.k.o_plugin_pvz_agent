@@ -279,50 +279,45 @@ class PvZStateReader:
     def __init__(self, memory: PvZMemory, guide_dir: str | Path | None = None) -> None:
         self._mem = memory
         self._guide_dir = Path(guide_dir) if guide_dir else None
-        self._conveyor_verdict: bool | None = None  # 粘性传送带判定（战斗首观测决定）
 
-    def conveyor_verdict(self, state: Any) -> bool | None:
-        """粘性传送带判定——判定结果盖章 state._is_conveyor。
+    def conveyor_verdict(self, state: Any) -> bool:
+        """传送带判定：**逐轮纯推导**（level_is_conveyor），无任何实例级缓存。
 
-        首观测：game_mode 非冒险(0)/未知(-1) 且 卡槽全空 → 传送带（小游戏类）。
-        其余一律普通关。
-        注意：曾用"卡槽类型跨轮变化"做动态升级，实测误判——该游戏会在
-        战斗中重排卡槽（[0,1,3,2,8,5]→[0,8,1,2,3,5]，同卡换位，bank 指针
-        同步变化），普通关被误升级成传送带关（不计阳光/不写冷却）。已删。
-        冒险模式传送带关（game_mode=0，如 1-5 坚果保龄球）识别不出时由
-        executor 的阳光自愈兜底（阳光耗尽+卡就绪 → 自动补阳光放行）。
-        首次战斗观测转储卡槽组头部 10 个 int（bank头），供后续按内存
-        结构精确判别做标定。
+        game_mode 非冒险(0)/未知(-1) 且 卡槽全空 → 传送带（小游戏类）；其余
+        一律普通关。结果盖章 state._is_conveyor 供 executor 共享。
+        为什么不用粘性缓存：service 有多个读取入口（文本循环、pvz_scan、
+        逐动作 execute 重读）且运行时进程长期存活，实例缓存在跨关/重启
+        混载时会分叉——实测 20:54 文本循环判普通关、execute 却按陈旧缓存
+        当传送带种（无阳光无冷却）。纯推导对同一内存状态恒等，天然一致。
+        误判历史：曾用"卡槽类型跨轮变化"升级，但该游戏会战斗中重排卡槽
+        （[0,1,3,2,8,5]→[0,8,1,2,3,5] 同卡换位），普通关被误升级，已删。
+        判 False 的冒险传送带关（mode=0，如 1-5 坚果保龄球）由 executor
+        阳光自愈兜底。bank头 在签名变化时转储，积累标定数据。
         """
-        ui = _as_int(getattr(state, "game_ui", -1))
-        if ui not in (2, 3):
-            self._conveyor_verdict = None
-            return None
-        if ui == 2:
-            # ui==2 两义：选卡界面（关卡之间）或个别特殊关卡的"战斗中"。
-            # 用场上实体区分：无植物且无僵尸 = 不在关卡界面 → 按用户实测
-            # 要求，此时刷新本关判定（否则传送带判定会残留到下一个关卡，
-            # 表现为换关后无限免费种植 + 传送带横幅残留）。特殊关卡的
-            # "ui=2 但战斗中"场上必有实体，不受影响。
-            if not getattr(state, "plants", None) and not getattr(state, "zombies", None):
-                if self._conveyor_verdict is not None:
-                    logger.info("[PvZ] 已离开关卡界面（选卡/过场），刷新关卡判定")
-                self._conveyor_verdict = None
-            return self._conveyor_verdict
-        if self._conveyor_verdict is None:
-            self._conveyor_verdict = level_is_conveyor(state)
-            logger.info(
-                "[PvZ] 关卡路由判定(首观测): game_mode=%s 卡槽=%s bank头=%s → %s",
-                _as_int(getattr(state, "game_mode", -1)),
-                [_as_int(getattr(s, "plant_type", -1)) for s in (getattr(state, "seeds", []) or [])][:10],
-                self._read_bank_header(),
-                "传送带关（不计阳光）" if self._conveyor_verdict else "普通关（PutPlant 直接注入，计阳光）",
-            )
+        verdict = level_is_conveyor(state)
         try:
-            state._is_conveyor = self._conveyor_verdict
+            state._is_conveyor = verdict
         except Exception:
             pass
-        return self._conveyor_verdict
+        self._dump_bank_if_changed(state, verdict)
+        return verdict
+
+    def _dump_bank_if_changed(self, state: Any, verdict: bool) -> None:
+        """卡槽组签名变化时转储 bank头（换关/卡槽变动各记一次，尽力而为）。"""
+        try:
+            bank = self._read_bank_header()
+            bar = tuple(_as_int(getattr(s, "plant_type", -1))
+                        for s in (getattr(state, "seeds", []) or [])[:10])
+            key = (tuple(bank or []), bar)
+            if key != getattr(self, "_last_bank_key", None):
+                self._last_bank_key = key
+                logger.info(
+                    "[PvZ] 传送带判定: game_mode=%s 卡槽=%s bank头=%s → %s",
+                    _as_int(getattr(state, "game_mode", -1)), list(bar), bank,
+                    "传送带关（不计阳光）" if verdict else "普通关（PutPlant 直接注入，计阳光）",
+                )
+        except Exception:
+            pass
 
     def _read_bank_header(self) -> list[int] | None:
         """卡槽组（SeedBank）头部 10 个 int——传送带标定用，尽力而为。"""
@@ -821,8 +816,8 @@ class PvZStateReader:
         lines: list[str] = []
 
         # ---- 基础信息 ----
-        # 传送带判定由 read_state 每轮无条件执行并盖章；这里只读结论。
-        belt = self._conveyor_verdict is True
+        # 传送带判定由 read_state 逐轮纯推导并盖章；这里只读本轮结论。
+        belt = getattr(state, "_is_conveyor", None) is True
         if belt:
             lines.append("🏷 关卡类型: 传送带关——植物由传送带供给，**不计阳光**（阳光数字无视）")
             lines.append("☀ 阳光: 不适用（传送带关没有阳光机制，卡可用就直接种，绝不要 wait）")
