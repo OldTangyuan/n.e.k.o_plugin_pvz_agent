@@ -198,33 +198,53 @@ class PvZExecutor:
             pass
         return verdict
 
-    def _belt_suspect(self) -> bool:
-        """疑似传送带漏判：本关已成功直注过且阳光已耗尽——传送带关没有
-        阳光机制，继续硬拦会把关卡卡死；此时补阳光放行而非拒绝。"""
+    def _belt_suspect(self, state: Any) -> bool:
+        """疑似传送带漏判：本关已成功直注过、阳光已耗尽、**且卡槽存在空位**
+        （传送带关特征——普通关/夜关卡槽全满，阳光合法地低，不放水）。
+        实测夜关（小喷菇+向日葵）阳光归零后被误判 → 无限补阳光"无阳光照种"。
+        """
         try:
-            return self._direct_plants >= 1 and self._safe_sun() <= 0
+            if self._direct_plants < 1 or self._safe_sun() > 0:
+                return False
+            return any(
+                getattr(s, "plant_type", -1) < 0 for s in (getattr(state, "seeds", []) or [])
+            )
         except Exception:
             return False
 
-    def _write_card_cd_full(self, card_index: int) -> None:
+    def _write_card_cd_full(self, state: Any, card_index: int) -> None:
         """PutPlant 绕过 UI：把卡槽冷却写满（sc_initial_cd → sc_cd），防止模型连种。
 
-        尽力而为：读失败/写失败仅记日志，不影响种植结果。
+        initial_cd 取**本轮读取快照**（state.seeds[card_index].initial_cd，与
+        种植决策同源）而非重新读内存——实测重读会拿到 0 导致静默跳过。
+        写后回读验证：写不进去（卡槽数组被游戏迁移）会明确记日志。
         """
         if not (self._mem and self._injector):
             return
         try:
+            seeds = getattr(state, "seeds", []) or []
+            if card_index < 0 or card_index >= len(seeds):
+                return
+            expected = int(getattr(seeds[card_index], "initial_cd", 0) or 0)
+            if expected <= 0:
+                return
             off = self._mem.offsets
             seed_array = self._mem.read_pointer(self._mem.main_object + off.seed_array)
             if not seed_array:
+                logger.info("[PvZ执行] 冷却写回跳过：卡槽组地址为 0")
                 return
             card_addr = seed_array + off.seed_card_offset + card_index * off.seed_card_size
-            initial_cd = self._mem.read_int(card_addr + off.sc_initial_cd)
-            if initial_cd > 0:
-                self._injector.write_int(card_addr + off.sc_cd, initial_cd)
+            self._injector.write_int(card_addr + off.sc_cd, expected)
+            written = self._mem.read_int(card_addr + off.sc_cd)
+            if written == expected:
                 logger.info(
-                    "[PvZ执行] ⏳ 卡片 [%s] 冷却写回 %s 厘秒（PutPlant 不走 UI，手动置冷却）",
-                    card_index, initial_cd,
+                    "[PvZ执行] ⏳ 卡片 [%s] 冷却写回 %s 厘秒（回读验证一致）",
+                    card_index, expected,
+                )
+            else:
+                logger.info(
+                    "[PvZ执行] ⚠ 卡片 [%s] 冷却写回未生效（写入 %s 厘秒，回读 %s）——"
+                    "卡槽数组可能已被游戏迁移，冷却可能不显示", card_index, expected, written,
                 )
         except Exception as exc:
             logger.info("[PvZ执行] 卡片冷却写回失败（不影响种植）: %s", exc)
@@ -366,7 +386,7 @@ class PvZExecutor:
                 result["warning"] = (
                     f"传送带关不计阳光（当前 {state.sun}，卡 {seed.sun_cost}☀）——直接种植"
                 )
-            elif self._belt_suspect():
+            elif self._belt_suspect(state):
                 # 疑似传送带漏判（已直注过+阳光耗尽+卡就绪）：补阳光放行，
                 # 避免把没有阳光机制的关卡卡死（实测 1-5 坚果保龄球）
                 before = self._safe_sun()
@@ -440,7 +460,7 @@ class PvZExecutor:
             # 的条件是错的：普通关选卡少于 10 张时卡槽本就有空位，
             # 导致小喷菇等卡不进冷却、可无限连种（用户实测）。
             if not conveyor:
-                self._write_card_cd_full(card_index)
+                self._write_card_cd_full(state, card_index)
             result["detail"] = f"种植 {seed.name} 到 行{row}列{col} (直接注入)"
         else:
             result["warning"] = (
