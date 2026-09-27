@@ -280,23 +280,23 @@ class PvZStateReader:
         self._mem = memory
         self._guide_dir = Path(guide_dir) if guide_dir else None
         self._conveyor_verdict: bool | None = None  # 粘性传送带判定（战斗首观测决定）
-        self._last_slot_types: list[int] | None = None
 
     def conveyor_verdict(self, state: Any) -> bool | None:
-        """粘性传送带判定（证据升级制）——判定结果盖章 state._is_conveyor。
+        """粘性传送带判定——判定结果盖章 state._is_conveyor。
 
-        1. 首观测：game_mode 非冒险(0)/未知(-1) 且 卡槽全空 → 传送带（小游戏类）；
-        2. 动态证据：任一卡槽的卡片**类型**在两次战斗观测间变化 → 传送带
-           （普通关卡卡组固定、类型永不变化；教程关只新增槽位不改已有类型）；
-        3. 其余维持普通关。冒险模式传送带关 game_mode=0（实测 1-5 坚果保龄球），
-           只能靠 2 升级识别。
-        首次战斗观测同时转储卡槽组头部 10 个 int（bank头），为后续按内存
+        首观测：game_mode 非冒险(0)/未知(-1) 且 卡槽全空 → 传送带（小游戏类）。
+        其余一律普通关。
+        注意：曾用"卡槽类型跨轮变化"做动态升级，实测误判——该游戏会在
+        战斗中重排卡槽（[0,1,3,2,8,5]→[0,8,1,2,3,5]，同卡换位，bank 指针
+        同步变化），普通关被误升级成传送带关（不计阳光/不写冷却）。已删。
+        冒险模式传送带关（game_mode=0，如 1-5 坚果保龄球）识别不出时由
+        executor 的阳光自愈兜底（阳光耗尽+卡就绪 → 自动补阳光放行）。
+        首次战斗观测转储卡槽组头部 10 个 int（bank头），供后续按内存
         结构精确判别做标定。
         """
         ui = _as_int(getattr(state, "game_ui", -1))
         if ui not in (2, 3):
             self._conveyor_verdict = None
-            self._last_slot_types = None
             return None
         if ui == 2:
             # ui==2 两义：选卡界面（关卡之间）或个别特殊关卡的"战斗中"。
@@ -305,29 +305,19 @@ class PvZStateReader:
             # 表现为换关后无限免费种植 + 传送带横幅残留）。特殊关卡的
             # "ui=2 但战斗中"场上必有实体，不受影响。
             if not getattr(state, "plants", None) and not getattr(state, "zombies", None):
-                if self._conveyor_verdict is not None or self._last_slot_types is not None:
-                    logger.info("[PvZ] 已离开关卡界面（选卡/过场），刷新关卡判定与动态证据")
+                if self._conveyor_verdict is not None:
+                    logger.info("[PvZ] 已离开关卡界面（选卡/过场），刷新关卡判定")
                 self._conveyor_verdict = None
-                self._last_slot_types = None
             return self._conveyor_verdict
-        types = [_as_int(getattr(s, "plant_type", -1)) for s in (getattr(state, "seeds", []) or [])]
         if self._conveyor_verdict is None:
             self._conveyor_verdict = level_is_conveyor(state)
             logger.info(
                 "[PvZ] 关卡路由判定(首观测): game_mode=%s 卡槽=%s bank头=%s → %s",
-                _as_int(getattr(state, "game_mode", -1)), types[:10], self._read_bank_header(),
+                _as_int(getattr(state, "game_mode", -1)),
+                [_as_int(getattr(s, "plant_type", -1)) for s in (getattr(state, "seeds", []) or [])][:10],
+                self._read_bank_header(),
                 "传送带关（不计阳光）" if self._conveyor_verdict else "普通关（PutPlant 直接注入，计阳光）",
             )
-        elif not self._conveyor_verdict and self._last_slot_types is not None:
-            for i, (cur, prev) in enumerate(zip(types, self._last_slot_types)):
-                if prev >= 0 and cur >= 0 and cur != prev:
-                    self._conveyor_verdict = True
-                    logger.info(
-                        "[PvZ] 关卡路由升级: 卡槽 %s 类型 %s→%s（普通关卡组类型不变）→ 传送带关（不计阳光）",
-                        i, prev, cur,
-                    )
-                    break
-        self._last_slot_types = types
         try:
             state._is_conveyor = self._conveyor_verdict
         except Exception:
