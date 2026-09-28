@@ -1,23 +1,19 @@
-"""配置加载：plugin.toml（AI 服务/行为开关） + .env（旧版密钥回退） + config.json（布局/行为） → 全局 settings 对象。
+"""配置加载：注入的 [pvz_agent]（宿主/profile 覆盖） + config.json（布局/行为） → 全局 settings 对象。
 
-AI 密钥/模型新版直接写在插件 plugin.toml 的 [pvz_agent] 段（api_base_url /
-api_model / api_key，text_api_* 可选覆盖纯文本模式），由宿主 configure() 注入；
-旧版 pvz/.env 与环境变量仍兼容读取，但非空的 plugin.toml 值优先。
+AI 密钥/模型写在插件配置通道（宿主 configure() 注入的 [pvz_agent] 段，含
+profiles/default.toml 用户覆盖），不再读取 pvz/.env 与环境变量。
 """
 
 from __future__ import annotations
 
 import json
-import os
 from dataclasses import dataclass, field
 from pathlib import Path
 
 # 项目根目录 = pvz_agent 的上一级（即 C:\...\pvz）
 BASE_DIR = Path(__file__).resolve().parent.parent
 
-ENV_FILE = BASE_DIR / ".env"
 CONFIG_FILE = BASE_DIR / "config.json"
-ENV_EXAMPLE = BASE_DIR / ".env.example"
 
 
 # --------------------------------------------------------------------------- #
@@ -25,7 +21,7 @@ ENV_EXAMPLE = BASE_DIR / ".env.example"
 # --------------------------------------------------------------------------- #
 @dataclass
 class VLMConfig:
-    """VLM 接口配置（密钥类，来自 plugin.toml [pvz_agent] / .env / 环境变量）。"""
+    """VLM 接口配置（密钥类，来自注入的 plugin.toml [pvz_agent] / profiles 覆盖）。"""
 
     base_url: str = ""
     model: str = ""
@@ -222,7 +218,7 @@ class AppConfig:
     #   parser，不依赖原生函数调用）；"fc"=OpenAI 原生 function calling。
     tool_call_mode: str = "fc"
     vlm: VLMConfig = field(default_factory=VLMConfig)   # 视觉模式的模型配置
-    # 纯文本模式的模型配置：完全独立（.env 的 TEXT_VLM_* + config.json 的 text_vlm 段），
+    # 纯文本模式的模型配置：text_api_* 优先，缺省回退视觉模式配置（config.json 的 text_vlm 段只管行为），
     # 可指定不同的模型、开启思考模式、更大输出预算。
     text_vlm: VLMConfig = field(default_factory=VLMConfig)
     # 纯文本模式保留的历史上下文轮数（更大 = 更多上下文，纯文本便宜）
@@ -247,20 +243,6 @@ class AppConfig:
 # --------------------------------------------------------------------------- #
 #  加载
 # --------------------------------------------------------------------------- #
-def _load_env(path: Path) -> dict[str, str]:
-    """读取简单 .env 文件（KEY=VALUE，忽略 # 注释与空行）。"""
-    result: dict[str, str] = {}
-    if not path.is_file():
-        return result
-    for line in path.read_text(encoding="utf-8").splitlines():
-        line = line.strip()
-        if not line or line.startswith("#") or "=" not in line:
-            continue
-        key, _, value = line.partition("=")
-        result[key.strip()] = value.strip().strip('"').strip("'")
-    return result
-
-
 def _load_json(path: Path) -> dict:
     if not path.is_file():
         return {}
@@ -272,25 +254,23 @@ def _load_json(path: Path) -> dict:
 
 
 def load_config(plugin_cfg: dict | None = None) -> AppConfig:
-    """读取 plugin.toml（注入值） + .env + config.json 合并为 AppConfig。
+    """读取注入的 [pvz_agent]（宿主/profile 覆盖） + config.json 合并为 AppConfig。
 
-    优先级：plugin.toml [pvz_agent] 的 api_*（非空值） > 环境变量 > .env 文件 > 默认值。
-    api_key 未配置时打印指引并退出（不静默带默认密钥）。
-    ``plugin_cfg``：宿主注入的 [pvz_agent] 段（service.configure 通道）；独立运行
-    （main/calibrate）不传，走 .env/config.json 旧链路。
+    ``plugin_cfg``：宿主注入的 [pvz_agent] 段（service.configure 通道）。密钥
+    只走该通道（profiles/default.toml 覆盖经宿主 config.dump() 汇入），不再读
+    .env/环境变量。独立运行（main/calibrate）不传时 AI 配置为空，仅布局/行为可用。
     """
-    env = _load_env(ENV_FILE)
     jcfg = _load_json(CONFIG_FILE)
+    _pc = plugin_cfg if isinstance(plugin_cfg, dict) else {}
 
-    def env_get(key: str, default: str = "") -> str:
-        # 环境变量优先，其次 .env 文件
-        return os.environ.get(key) or env.get(key, default)
+    def _pc_get(key: str) -> str:
+        return str(_pc.get(key, "") or "").strip()
 
-    # ---- VLM（密钥类来自 .env）----
+    # ---- VLM（视觉模式；密钥/模型来自注入的 [pvz_agent]）----
     vlm = VLMConfig(
-        base_url=env_get("VLM_BASE_URL", ""),
-        model=env_get("VLM_MODEL", ""),
-        api_key=env_get("VLM_API_KEY", ""),
+        base_url=_pc_get("api_base_url"),
+        model=_pc_get("api_model"),
+        api_key=_pc_get("api_key"),
         max_output_tokens=jcfg.get("vlm", {}).get("max_output_tokens", 4096),
         temperature=jcfg.get("vlm", {}).get("temperature", 0.3),
         retries=jcfg.get("vlm", {}).get("retries", 3),
@@ -300,28 +280,12 @@ def load_config(plugin_cfg: dict | None = None) -> AppConfig:
         tool_choice=jcfg.get("vlm", {}).get("tool_choice", "required"),
     )
 
-    # ---- 插件级 AI 服务配置（plugin.toml [pvz_agent]，非空值优先覆盖）----
-    # 新版把密钥/模型直接写在 plugin.toml；.env 与环境变量仍兼容（回退链）。
-    # 注意：必须先覆盖 vlm 再构建 text_vlm——text 的构造期回退（or vlm.*）才能
-    # 拿到 plugin.toml 的值（否则只配 api_key 时 text 模式拿不到）。
-    _pc = plugin_cfg if isinstance(plugin_cfg, dict) else {}
-
-    def _pc_get(key: str) -> str:
-        return str(_pc.get(key, "") or "").strip()
-
-    if _pc_get("api_base_url"):
-        vlm.base_url = _pc_get("api_base_url")
-    if _pc_get("api_model"):
-        vlm.model = _pc_get("api_model")
-    if _pc_get("api_key"):
-        vlm.api_key = _pc_get("api_key")
-
-    # ---- 纯文本模式 VLM（完全独立：TEXT_VLM_* / text_api_* 优先，缺省回退 vlm；行为来自 text_vlm 段）----
+    # ---- 纯文本模式 VLM（text_api_* 优先，缺省回退 vlm.*；行为来自 text_vlm 段）----
     tv = jcfg.get("text_vlm", {}) if isinstance(jcfg.get("text_vlm"), dict) else {}
     text_vlm = VLMConfig(
-        base_url=env_get("TEXT_VLM_BASE_URL", "") or vlm.base_url,
-        model=env_get("TEXT_VLM_MODEL", "") or vlm.model,
-        api_key=env_get("TEXT_VLM_API_KEY", "") or vlm.api_key,
+        base_url=_pc_get("text_api_base_url") or vlm.base_url,
+        model=_pc_get("text_api_model") or vlm.model,
+        api_key=_pc_get("text_api_key") or vlm.api_key,
         max_output_tokens=int(tv.get("max_output_tokens", 2048)),
         temperature=float(tv.get("temperature", 0.3)),
         retries=int(tv.get("retries", 2)),
@@ -331,13 +295,6 @@ def load_config(plugin_cfg: dict | None = None) -> AppConfig:
         tool_choice=str(tv.get("tool_choice", "auto") or "auto").strip().lower(),
     )
     text_max_history_rounds = int(tv.get("max_history_rounds", 6))
-
-    if _pc_get("text_api_base_url"):
-        text_vlm.base_url = _pc_get("text_api_base_url")
-    if _pc_get("text_api_model"):
-        text_vlm.model = _pc_get("text_api_model")
-    if _pc_get("text_api_key"):
-        text_vlm.api_key = _pc_get("text_api_key")
 
     # ---- 布局（config.json）----
     lay = jcfg.get("layout", {})
@@ -491,20 +448,17 @@ def load_config(plugin_cfg: dict | None = None) -> AppConfig:
 
     # ---- 按当前 mode 校验对应决策模型配置（text 用 text_vlm，vision 用 vlm）----
     _decision = app.text_vlm if _mode == "text" else app.vlm
-    _env_prefix = "TEXT_VLM_" if _mode == "text" else "VLM_"
     if not _decision.api_key:
-        print("[配置] 未找到 AI 决策密钥。请在插件配置 plugin.toml 的 [pvz_agent] 段填写：")
+        print("[配置] 未找到 AI 决策密钥。请在插件配置面板填写，或 plugin.toml [pvz_agent] 段：")
         print('  api_base_url = "你的OpenAI兼容接口地址（如 https://api.example.com/v1）"')
         print('  api_model    = "你的模型名"')
         print('  api_key      = "你的密钥"')
-        print(f"（旧版方式仍兼容：pvz/.env 里填 {_env_prefix}API_KEY 等。）")
-        raise SystemExit(f"缺少 AI 决策密钥（plugin.toml 的 api_key 或 pvz/.env 的 {_env_prefix}API_KEY）")
+        raise SystemExit("缺少 AI 决策密钥（api_key；面板保存写入 profiles/default.toml）")
 
     if not _decision.base_url:
-        _decision.base_url = env_get(f"{_env_prefix}BASE_URL", "https://api.openai.com/v1")
+        _decision.base_url = "https://api.openai.com/v1"
     if not _decision.model:
-        print("[配置] 未找到 AI 模型名。请在 plugin.toml [pvz_agent] 填 api_model")
-        print(f"（旧版方式仍兼容：pvz/.env 里填 {_env_prefix}MODEL。）")
-        raise SystemExit(f"缺少 AI 模型名（plugin.toml 的 api_model 或 pvz/.env 的 {_env_prefix}MODEL）")
+        print("[配置] 未找到 AI 模型名。请在插件配置面板填写，或 plugin.toml [pvz_agent] 填 api_model")
+        raise SystemExit("缺少 AI 模型名（api_model）")
 
     return app

@@ -387,8 +387,8 @@ class PvZAgentService:
             self._feed_max_edge = int(plugin_cfg.get("screenshot_max_edge_px", 0) or 0)
             self._feed_quality = int(plugin_cfg.get("screenshot_jpeg_quality", 95) or 95)
             self._feed_max_bytes = int(plugin_cfg.get("screenshot_max_bytes", 160 * 1024) or (160 * 1024))
-            # AI 服务配置（plugin.toml [pvz_agent] 的 api_* 键）：非空值在
-            # load_config 里覆盖 .env / config.json——密钥不再需要单独配 pvz/.env。
+            # AI 服务配置（注入的 [pvz_agent] api_* 键，含 profiles/default.toml
+            # 用户覆盖）：load_config 只认该通道，密钥不再读 pvz/.env。
             self._api_cfg = {
                 k: str(plugin_cfg.get(k, "") or "").strip()
                 for k in (
@@ -580,9 +580,9 @@ class PvZAgentService:
     ) -> Any:
         """构建完整运行时（执行器/扫描器/VLM/planner）。
 
-        需要 AI 决策密钥：plugin.toml [pvz_agent] 的 api_key（推荐），旧版
-        pvz/.env 仍兼容；缺失时抛 RuntimeError（携带指引），由调用方转成可读
-        错误返回。反复调用幂等。
+        需要 AI 决策密钥：插件配置面板保存（写 profiles/default.toml）或
+        plugin.toml [pvz_agent] 的 api_key；缺失时抛 RuntimeError（携带指引），
+        由调用方转成可读错误返回。反复调用幂等。
         ``window_timeout``/``window_cancel`` 透传给窗口轮询（见 ``_ensure_window``）。
         """
         if self._planner is not None:
@@ -594,8 +594,9 @@ class PvZAgentService:
         except SystemExit as exc:
             detail = str(exc).strip() or str(exc.code)
             raise RuntimeError(
-                f"PVZ 配置不完整：{detail}。可在插件配置 plugin.toml 的 [pvz_agent] 段填 "
-                "api_base_url / api_model / api_key（旧版 pvz/.env 仍兼容）。"
+                f"PVZ 配置不完整：{detail}。可在插件配置面板填写 api_base_url / "
+                "api_model / api_key（保存写入 profiles/default.toml），或直接填 "
+                "plugin.toml [pvz_agent]。"
             )
         # 应用插件级开关（覆盖 pvz/config.json 的对应项）
         cfg.sun.enabled = bool(cfg.sun.enabled) and self._sun_auto_collect
@@ -804,11 +805,11 @@ class PvZAgentService:
             "memory": self._memory_status(),
             "config_paths": {
                 # 配置文件绝对路径，方便用户直接去对应文件夹编辑。
-                # AI 密钥/模型新版直接写在 plugin.toml [pvz_agent]（api_* 键）；
-                # .env 为旧版兼容（仍读取，但会被 plugin.toml 非空值覆盖）。
+                # AI 密钥/模型走配置面板（写 profiles/default.toml）或 plugin.toml
+                # [pvz_agent]（api_* 键）；不再读取 .env。
                 "plugin_toml": str(Path(__file__).resolve().parent / "plugin.toml"),
                 "core_config": str(CORE_DIR / "config.json"),
-                "env": str(CORE_DIR / ".env"),
+                "profile": str(Path(__file__).resolve().parent / "profiles" / "default.toml"),
             },
             "feed": {"enabled": feed_enabled, "last_push_at": last_feed_at},
             "steps": step_count,

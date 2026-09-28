@@ -247,23 +247,6 @@ class PVZAgentPlugin(NekoPluginBase):
         except Exception:
             return {"status": {}, "plugin_started": False}
 
-    def _read_env_fallback(self) -> dict[str, str]:
-        """读 pvz/.env（旧配置通道），只用于"密钥是否已设置"的探测。"""
-        try:
-            path = Path(__file__).resolve().parent / "pvz" / ".env"
-            if not path.exists():
-                return {}
-            out: dict[str, str] = {}
-            for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
-                s = line.strip()
-                if not s or s.startswith("#") or "=" not in s:
-                    continue
-                k, _, v = s.partition("=")
-                out[k.strip()] = v.strip().strip('"').strip("'")
-            return out
-        except Exception:
-            return {}
-
     def _write_profile_section(self, section: str, updates: JsonObject) -> Path:
         """把 updates 合并进 profiles/default.toml 的 [section] 段（其余段原样保留）。
 
@@ -689,16 +672,9 @@ class PVZAgentPlugin(NekoPluginBase):
         async def _run():
             cfg = dict(self._cfg or {})
             data: JsonObject = {k: v for k, v in cfg.items() if k not in _CONFIG_SECRET_KEYS}
-            # 密钥：明文不出插件，回打码摘要 + 是否已设置（含 pvz/.env 回退探测）
-            env_vals = self._read_env_fallback()
-            merged_key = (
-                str(cfg.get("api_key", "") or "").strip()
-                or str(env_vals.get("VLM_API_KEY", "") or "").strip()
-            )
-            merged_text_key = (
-                str(cfg.get("text_api_key", "") or "").strip()
-                or str(env_vals.get("TEXT_VLM_API_KEY", "") or "").strip()
-            )
+            # 密钥：明文不出插件，回打码摘要 + 是否已设置
+            merged_key = str(cfg.get("api_key", "") or "").strip()
+            merged_text_key = str(cfg.get("text_api_key", "") or "").strip()
             data["api_key_masked"] = _mask_secret(merged_key)
             data["api_key_set"] = bool(merged_key)
             data["text_api_key_masked"] = _mask_secret(merged_text_key)
@@ -814,6 +790,13 @@ class PVZAgentPlugin(NekoPluginBase):
                 summary += "（含密钥更新）"
             if skipped:
                 summary += f"；跳过无效项: {', '.join(skipped)}"
-            return {"summary": summary, "needs_restart": True, "saved": sorted(updates)}
+            # 打码摘要回给面板展示（明文不出插件）
+            return {
+                "summary": summary,
+                "needs_restart": True,
+                "saved": sorted(updates),
+                "key_masked": _mask_secret(str(self._cfg.get("api_key", "") or "").strip()),
+                "text_key_masked": _mask_secret(str(self._cfg.get("text_api_key", "") or "").strip()),
+            }
 
         return await self._run_entry(_run)

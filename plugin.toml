@@ -16,8 +16,19 @@ supported = ">=0.1.0,<0.3.0"
 enabled = true
 auto_start = false
 
-# 插件级行为配置。AI 决策密钥/模型直接填在下面 [pvz_agent] 的 api_* 键
-# （无需再单独配置 pvz/.env；旧 .env 仍兼容读取，但会被这里的非空值覆盖）。
+# 用户配置覆盖文件（宿主"最新配置系统"）：宿主 GUI 配置界面与本插件配置
+# 面板保存都写 profiles/default.toml（深合并覆盖 [pvz_agent] 同名键），
+# config.dump() 会汇入覆盖值。该文件已被 .gitignore 排除，密钥不进仓库。
+# 可用环境变量 NEKO_PLUGIN_PVZ_AGENT_PROFILE 切换 profile。
+[plugin.config_profiles]
+active = "default"
+
+[plugin.config_profiles.files]
+default = "profiles/default.toml"
+
+# 插件级行为配置。AI 决策密钥/模型用插件配置面板填写（保存写入
+# profiles/default.toml），也可直接填在下面 [pvz_agent] 的 api_* 键。
+# 不再读取 pvz/.env 与环境变量。
 # 布局坐标与 OpenCV 阈值仍在 pvz/config.json（calibrate 校准工具读写，保持联动）。
 [pvz_agent]
 # ── AI 决策服务（OpenAI 兼容接口；猫娘自主决策用，必填）──

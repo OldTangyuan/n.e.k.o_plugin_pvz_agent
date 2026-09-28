@@ -258,12 +258,16 @@ export default function PvZAgentConfigPanel(props: PluginSurfaceProps) {
       const envelope = await props.api.call("pvz_config_set", payload)
       if (unmountedRef.current) return
       const data = unwrapActionResult(envelope)
+      const savedKeys = (data.saved as string[]) || []
       set({
         saving: false,
         apiKeyInput: "",
         textApiKeyInput: "",
-        apiKeySet: Boolean(data.saved && (data.saved as string[]).includes("api_key"))
-          || form.apiKeySet,
+        // 保存后立即回显打码摘要（后端 pvz_config_set 返回 key_masked）
+        apiKeySet: Boolean(form.apiKeySet || savedKeys.includes("api_key")),
+        apiKeyMasked: String(data.key_masked || form.apiKeyMasked || ""),
+        textApiKeySet: Boolean(form.textApiKeySet || savedKeys.includes("text_api_key")),
+        textApiKeyMasked: String(data.text_key_masked || form.textApiKeyMasked || ""),
         message:
           String(data.summary || "已保存") +
           (data.needs_restart ? "——重启插件后生效（插件列表里停止再启动）" : ""),
@@ -321,7 +325,7 @@ export default function PvZAgentConfigPanel(props: PluginSurfaceProps) {
             help={
               form.apiKeySet
                 ? `已保存（${form.apiKeyMasked}）。留空 = 不修改；输入新值 = 覆盖。`
-                : "尚未设置（若 pvz/.env 里配了 VLM_API_KEY 也可用）。密钥保存到 profiles/default.toml"
+                : "尚未设置。密钥保存到插件目录 profiles/default.toml（不进仓库）"
             }
           >
             <PasswordInput
@@ -434,7 +438,7 @@ export default function PvZAgentConfigPanel(props: PluginSurfaceProps) {
       </Card>
 
       <Warning>
-        密钥只保存在插件本地的 profiles/default.toml / pvz/.env，不会进仓库；面板永远不回显明文。
+        密钥只保存在插件本地的 profiles/default.toml，不会进仓库；面板永远不回显明文。
       </Warning>
       <Alert tone="info">
         配置项与 plugin.toml [pvz_agent] 一一对应；直接编辑 plugin.toml 依然可用
