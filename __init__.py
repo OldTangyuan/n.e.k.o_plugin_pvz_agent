@@ -86,7 +86,27 @@ _CONFIG_STR_KEYS = (
     "api_base_url", "api_model", "text_api_base_url", "text_api_model",
     "thinking", "text_thinking", "screenshot_nudge_text",
 )
+# 这些字符串键留空 = 不修改已保存值（防面板全量保存时空字段冲掉好配置——
+# 曾因此把 api_base_url/api_model 清空）。空值对它们没有合法语义：留空走回退。
+_CONFIG_STR_NOEMPTY = ("api_base_url", "api_model", "text_api_base_url", "text_api_model")
+# 这些字符串键的空值是合法配置（thinking=""=不发送思考参数；nudge_text=""=默认文案）。
 _CONFIG_SECRET_KEYS = ("api_key", "text_api_key")
+
+
+def _read_profile_section(section: str = "pvz_agent") -> JsonObject:
+    """插件**直接**读 profiles/default.toml 的 [section] 段。
+
+    面板/宿主 GUI 的用户覆盖都写在这个文件里。不依赖宿主认不认
+    [plugin.config_profiles] 声明——config.dump() 拿不到覆盖值时（宿主版本
+    行为差异），插件自己读文件兜底，密钥等配置不会"重启后消失"。
+    """
+    path = Path(__file__).resolve().parent / "profiles" / "default.toml"
+    try:
+        parsed = tomllib.loads(path.read_text(encoding="utf-8"))
+        sec = parsed.get(section)
+        return dict(sec) if isinstance(sec, dict) else {}
+    except Exception:
+        return {}
 
 
 def _toml_value_repr(value: Any) -> str:
@@ -114,24 +134,22 @@ def _mask_secret(value: Any) -> str:
 
 
 def merge_config_sources(
-    file_cfg: JsonObject, host_cfg: JsonObject, mtimes: tuple[float, float]
+    file_cfg: JsonObject, host_cfg: JsonObject, _mtimes: tuple[float, float] | None = None
 ) -> JsonObject:
-    """合并"插件自带 plugin.toml"与"宿主运行时配置"两个配置来源。
+    """按固定优先级合并三个配置来源（后者非空值覆盖前者）：
 
-    用户改配置有两条通道：直接编辑 plugin.toml，或在宿主 GUI 配置界面里改
-    （写进 profiles/default.toml，反映到 ``config.dump()``）。以**修改时间较新
-    的一方为基准**（用户最后编辑的通道整体生效），另一方里的非空值作补充——
-    两边都没填的键走内置默认，任何一边填了都能被读到，不再互相掩盖。
+    1. ``file_cfg``：插件自带 plugin.toml 的 [pvz_agent]（包默认值，随包分发）；
+    2. ``host_cfg``：宿主运行时 ``config.dump()`` 的 [pvz_agent]（GUI 配置系统视图）；
+    3. ``profiles/default.toml``（内部直读）：面板/宿主 GUI 保存的用户覆盖，密钥所在。
+
+    **空值永不覆盖**：非空字符串/有效值才写入合并结果——任何来源里的空串
+    （比如面板加载失败后全量保存的空字段）都不会冲掉已有配置。
     """
-    file_mtime, profile_mtime = mtimes
-    if host_cfg and profile_mtime > file_mtime:
-        base, overlay = dict(file_cfg), host_cfg
-    else:
-        base, overlay = dict(host_cfg), file_cfg
-    merged = dict(base)
-    for key, value in overlay.items():
-        if _nonempty_str(value):
-            merged[key] = value
+    merged: JsonObject = dict(file_cfg)
+    for source in (host_cfg, _read_profile_section()):
+        for key, value in source.items():
+            if _nonempty_str(value):
+                merged[key] = value
     return merged
 
 
@@ -161,18 +179,21 @@ class PVZAgentPlugin(NekoPluginBase):
     @lifecycle(id="startup")
     async def startup(self, **_: Any):
         file_cfg = self._read_own_plugin_config()
-        # 宿主运行时配置（GUI 配置界面编辑会写进 profiles/default.toml，
-        # config.dump() 是"包默认值 + 用户覆盖"的合并视图）
+        # 宿主运行时配置（GUI 配置系统视图）
         host_cfg: JsonObject = {}
         try:
             dumped = _as_mapping(await self.config.dump(timeout=5.0))
             host_cfg = _as_mapping(dumped.get("pvz_agent", {}))
         except Exception as exc:
             self.logger.warning("[pvz_agent] 读取宿主运行时配置失败（忽略）: %s", exc)
-        self._cfg = merge_config_sources(file_cfg, host_cfg, self._source_mtimes())
+        # 合并内部直读 profiles/default.toml（面板保存的用户覆盖/密钥所在，
+        # 不依赖宿主是否认 config_profiles 声明），空值永不覆盖
+        self._cfg = merge_config_sources(file_cfg, host_cfg)
+        profile_cfg = _read_profile_section()
         self.logger.info(
-            "[pvz_agent] 配置来源: 自带 plugin.toml %d 键 + 宿主运行时 %d 键 → 合并 %d 键",
-            len(file_cfg), len(host_cfg), len(self._cfg),
+            "[pvz_agent] 配置来源: 自带 plugin.toml %d 键 + 宿主运行时 %d 键 "
+            "+ profiles/default.toml %d 键 → 合并 %d 键",
+            len(file_cfg), len(host_cfg), len(profile_cfg), len(self._cfg),
         )
         self._service.configure(self._cfg)
         preflight = self._service.probe()
@@ -189,21 +210,6 @@ class PVZAgentPlugin(NekoPluginBase):
         if bool(self._cfg.get("auto_start", False)):
             status["autostart"] = self._service.start()
         return Ok(status)
-
-    def _source_mtimes(self) -> tuple[float, float]:
-        """（自带 plugin.toml mtime, profiles/default.toml mtime），不存在记 0。"""
-        root = Path(__file__).resolve().parent
-        file_toml = root / "plugin.toml"
-        profile_toml = root / "profiles" / "default.toml"
-        try:
-            file_mtime = file_toml.stat().st_mtime if file_toml.exists() else 0.0
-        except OSError:
-            file_mtime = 0.0
-        try:
-            profile_mtime = profile_toml.stat().st_mtime if profile_toml.exists() else 0.0
-        except OSError:
-            profile_mtime = 0.0
-        return file_mtime, profile_mtime
 
     def _read_own_plugin_config(self) -> dict:
         """直接读插件自带 plugin.toml 的 [pvz_agent] 段。
@@ -671,6 +677,10 @@ class PVZAgentPlugin(NekoPluginBase):
     async def pvz_config_get(self, **_: Any):
         async def _run():
             cfg = dict(self._cfg or {})
+            # 兜底：_cfg 缺失的键用 profile 现值补（防运行中被重置后读到空）
+            for key, value in _read_profile_section().items():
+                if key not in cfg:
+                    cfg[key] = value
             data: JsonObject = {k: v for k, v in cfg.items() if k not in _CONFIG_SECRET_KEYS}
             # 密钥：明文不出插件，回打码摘要 + 是否已设置
             merged_key = str(cfg.get("api_key", "") or "").strip()
@@ -689,7 +699,8 @@ class PVZAgentPlugin(NekoPluginBase):
         name="保存 PVZ 插件配置",
         description=(
             "保存 [pvz_agent] 配置到 profiles/default.toml（与宿主 GUI 配置界面同一文件，"
-            "其余段原样保留）。密钥留空 = 不修改已保存值。保存后需重启插件生效。"
+            "其余段原样保留）。密钥/服务地址/模型名留空 = 不修改已保存值（面板全量"
+            "保存时不会冲掉原有配置）；思考参数可选空（=不发送）。保存后需重启插件生效。"
         ),
         llm_result_fields=["summary"],
         input_schema={
@@ -718,11 +729,11 @@ class PVZAgentPlugin(NekoPluginBase):
                     "items": {"type": "string"},
                     "description": "窗口标题关键词列表",
                 },
-                "api_base_url": {"type": "string"},
-                "api_model": {"type": "string"},
+                "api_base_url": {"type": "string", "description": "留空 = 不修改"},
+                "api_model": {"type": "string", "description": "留空 = 不修改"},
                 "api_key": {"type": "string", "description": "留空 = 不修改"},
-                "text_api_base_url": {"type": "string"},
-                "text_api_model": {"type": "string"},
+                "text_api_base_url": {"type": "string", "description": "留空 = 不修改"},
+                "text_api_model": {"type": "string", "description": "留空 = 不修改"},
                 "text_api_key": {"type": "string", "description": "留空 = 不修改"},
                 "thinking": {"type": "string"},
                 "text_thinking": {"type": "string"},
@@ -734,6 +745,7 @@ class PVZAgentPlugin(NekoPluginBase):
         async def _run():
             updates: JsonObject = {}
             skipped: list[str] = []
+            kept: list[str] = []  # 留空 = 保持原值（不算错误）
             for key, val in values.items():
                 if key in _CONFIG_ENUM_CHOICES:
                     s = str(val or "").strip().lower()
@@ -767,19 +779,29 @@ class PVZAgentPlugin(NekoPluginBase):
                     if titles:
                         updates["window_titles"] = titles
                     else:
-                        skipped.append(key)
+                        kept.append(key)
                 elif key in _CONFIG_SECRET_KEYS:
                     s = str(val or "").strip()
                     if s:  # 留空 = 不修改已保存的密钥
                         updates[key] = s
+                    else:
+                        kept.append(key)
                 elif key in _CONFIG_STR_KEYS:
-                    updates[key] = str(val or "")
+                    s = str(val or "")
+                    if key in _CONFIG_STR_NOEMPTY and not s.strip():
+                        # 地址/模型留空 = 不修改（空值无合法语义，防全量保存冲掉已有配置）
+                        kept.append(key)
+                    else:
+                        updates[key] = s
                 # 未知键静默忽略
             if not updates:
                 return {
-                    "summary": "没有可保存的变更" + (f"（跳过: {', '.join(skipped)}）" if skipped else ""),
+                    "summary": "没有可保存的变更"
+                    + (f"（保持原值: {', '.join(kept)}）" if kept else "")
+                    + (f"（跳过: {', '.join(skipped)}）" if skipped else ""),
                     "needs_restart": False,
                     "skipped": skipped,
+                    "kept": kept,
                 }
             self._write_profile_section("pvz_agent", updates)
             # 同步内存中的合并视图（pvz_config_get 立即反映；service 层重启后生效）
@@ -788,6 +810,8 @@ class PVZAgentPlugin(NekoPluginBase):
             summary = f"已保存 {len(updates)} 项到 profiles/default.toml"
             if secret_keys:
                 summary += "（含密钥更新）"
+            if kept:
+                summary += f"；保持原值: {', '.join(kept)}"
             if skipped:
                 summary += f"；跳过无效项: {', '.join(skipped)}"
             # 打码摘要回给面板展示（明文不出插件）
