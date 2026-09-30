@@ -1,0 +1,296 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PVZ Agent 配置面板</title>
+<style>
+  :root { color-scheme: light dark; }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 20px 22px 48px;
+    font: 14px/1.6 "Segoe UI", "Microsoft YaHei", system-ui, sans-serif;
+    background: #f6f7f9; color: #1d2129;
+  }
+  @media (prefers-color-scheme: dark) {
+    body { background: #17181c; color: #d6d8de; }
+    .card { background: #1f2127 !important; border-color: #2e3138 !important; }
+    input, select, textarea { background: #17181c !important; color: #d6d8de !important; border-color: #3a3e47 !important; }
+    .diag { color: #8a8f9a !important; }
+  }
+  h1 { font-size: 19px; margin: 0 0 4px; }
+  .sub { margin: 0 0 10px; color: #5c6270; font-size: 13px; }
+  .diag { margin: 0 0 14px; color: #6b7180; font-size: 12px; font-family: Consolas, monospace; }
+  .card { background: #fff; border: 1px solid #e3e6ec; border-radius: 10px; padding: 16px 18px; margin-bottom: 16px; }
+  .card h2 { font-size: 15px; margin: 0 0 12px; }
+  .row { display: flex; flex-direction: column; margin-bottom: 12px; }
+  .row label { font-weight: 600; font-size: 13px; margin-bottom: 4px; }
+  .row .help { font-size: 12px; color: #7a8090; margin-top: 3px; }
+  input, select, textarea {
+    width: 100%; padding: 7px 10px; font: inherit; font-size: 13px;
+    border: 1px solid #d4d8e0; border-radius: 7px; outline: none;
+  }
+  input:focus, select:focus, textarea:focus { border-color: #4b7bec; }
+  textarea { resize: vertical; min-height: 56px; }
+  .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 0 16px; }
+  .btns { display: flex; gap: 10px; align-items: center; margin-top: 4px; }
+  button {
+    font: inherit; font-size: 14px; font-weight: 600; padding: 8px 20px;
+    border-radius: 8px; border: none; cursor: pointer;
+  }
+  button.primary { background: #2f6fed; color: #fff; }
+  button.primary:disabled { opacity: .55; cursor: default; }
+  button.ghost { background: transparent; color: inherit; border: 1px solid #b8bec9; }
+  .alert { padding: 9px 13px; border-radius: 8px; margin-bottom: 12px; font-size: 13px; }
+  .alert.ok { background: #e7f7ec; color: #17703a; border: 1px solid #b7e4c7; }
+  .alert.err { background: #fdecec; color: #b02a2a; border: 1px solid #f5c2c2; }
+  @media (prefers-color-scheme: dark) {
+    .alert.ok { background: #14301f; color: #7fd8a2; border-color: #235c38; }
+    .alert.err { background: #341a1a; color: #f19999; border-color: #5c2c2c; }
+    button.ghost { border-color: #4a4f59; }
+  }
+  .keyhint { font-size: 12px; color: #7a8090; }
+</style>
+</head>
+<body>
+  <h1>PVZ 配置面板</h1>
+  <p class="sub">覆盖 plugin.toml [pvz_agent] 的全部配置项；保存写入 profiles/default.toml（与宿主 GUI 配置界面同一文件），重启插件生效。</p>
+  <p class="diag" id="diag">面板 v8-static · 初始化中…</p>
+  <div id="alertBox"></div>
+
+  <div class="card"><h2>运行方式</h2>
+    <div class="row"><label>运行模式 (mode)</label><select id="mode"></select>
+      <div class="help">text=读内存+纯文本 LLM（推荐，需管理员权限）；vision=OpenCV 截图+视觉模型</div></div>
+    <div class="row"><label>种植模式 (planting_mode)</label><select id="plantingMode"></select>
+      <div class="help">模拟点击=游戏自管阳光/冷却（0.3.0 手感）；直注=插件手动修补副作用</div></div>
+    <div class="row"><label>工具调用模式 (tool_call_mode)</label><select id="toolCallMode"></select>
+      <div class="help">模型输出动作的解析方式</div></div>
+    <div class="grid2">
+      <div class="row"><label>启动时自动开始游玩 (auto_start)</label><select id="autoStart"></select></div>
+      <div class="row"><label>猫娘自动选卡 (agent_controls_seed_selection)</label><select id="agentSelects"></select>
+        <div class="help">关闭=选卡不触发 LLM（推荐）</div></div>
+    </div>
+  </div>
+
+  <div class="card"><h2>AI 决策服务（vision / text 共用；text 可单独覆盖）</h2>
+    <div class="row"><label>服务地址 (api_base_url)</label><input id="apiBaseurl" placeholder="https://api.example.com/v1">
+      <div class="help">OpenAI 兼容接口地址，如 https://api.deepseek.com</div></div>
+    <div class="grid2">
+      <div class="row"><label>模型名 (api_model)</label><input id="apiModel" placeholder="如 deepseek-chat / gpt-4o-mini"></div>
+      <div class="row"><label>API 密钥 (api_key)</label><input id="apiKeyInput" type="password" placeholder="">
+        <div class="help keyhint" id="apiKeyHint">留空 = 不修改已保存密钥</div></div>
+    </div>
+    <div class="grid2">
+      <div class="row"><label>思考参数 (thinking)</label><select id="thinking"></select></div>
+      <div class="row"><label>文本模式思考参数 (text_thinking)</label><select id="textThinking"></select></div>
+    </div>
+    <div class="grid2">
+      <div class="row"><label>文本模式服务地址 (text_api_base_url)</label><input id="textApiBaseurl" placeholder="留空 = 复用上面的服务">
+        <div class="help keyhint" id="textApiHint"></div></div>
+      <div class="row"><label>文本模式模型名 (text_api_model)</label><input id="textApiModel" placeholder="留空 = 复用上面的模型"></div>
+    </div>
+    <div class="row"><label>文本模式密钥 (text_api_key)</label><input id="textApiKeyInput" type="password" placeholder="">
+      <div class="help keyhint" id="textApiKeyHint">留空 = 不修改已保存密钥</div></div>
+  </div>
+
+  <div class="card"><h2>猫娘观察通道（截图推送）</h2>
+    <div class="grid2">
+      <div class="row"><label>被动截图流 (screenshot_feed_enabled)</label><select id="feedEnabled"></select></div>
+      <div class="row"><label>流最小间隔秒 (screenshot_feed_interval)</label><input id="feedInterval" type="number" step="0.5"></div>
+      <div class="row"><label>主动唤醒 (screenshot_nudge_enabled)</label><select id="nudgeEnabled"></select></div>
+      <div class="row"><label>唤醒最小间隔秒 (screenshot_nudge_interval)</label><input id="nudgeInterval" type="number" step="0.5"></div>
+    </div>
+    <div class="row"><label>唤醒触发文本 (screenshot_nudge_text)</label><textarea id="nudgeText"></textarea>
+      <div class="help">{MASTER_NAME} 会被替换为对你的称呼；留空则只推图不主动开口</div></div>
+    <div class="grid2">
+      <div class="row"><label>截图最长边像素 (screenshot_max_edge_px)</label><input id="maxEdgePx" type="number">
+        <div class="help">0 = 不缩放</div></div>
+      <div class="row"><label>JPEG 质量 (screenshot_jpeg_quality)</label><input id="jpegQuality" type="number" min="1" max="95"></div>
+      <div class="row"><label>单帧字节预算 (screenshot_max_bytes)</label><input id="maxBytes" type="number" step="1024"></div>
+    </div>
+  </div>
+
+  <div class="card"><h2>游玩行为</h2>
+    <div class="row"><label>游戏窗口标题关键词 (window_titles)</label>
+      <textarea id="windowTitles" placeholder="逗号或中文逗号分隔，如: plant vs zombie，植物大战僵尸"></textarea>
+      <div class="help">模糊匹配窗口标题包含任一关键词；另有 PopCap 引擎窗口类兜底。改完保存即生效，无需重启。</div></div>
+    <div class="grid2">
+      <div class="row"><label>自动收集阳光 (sun_auto_collect)</label><select id="sunAutoCollect"></select></div>
+      <div class="row"><label>网格扫描 (scan_grid_enabled)</label><select id="scanGrid"></select></div>
+      <div class="row"><label>卡片扫描 (scan_cards_enabled)</label><select id="scanCards"></select></div>
+      <div class="row"><label>卡片定位方式 (card_position_mode)</label><select id="cardPositionMode"></select></div>
+      <div class="row"><label>关卡结束通报 (notify_on_terminate)</label><select id="notifyTerminate"></select></div>
+      <div class="row"><label>窗口丢失通报 (notify_window_lost)</label><select id="notifyWindowLost"></select></div>
+    </div>
+  </div>
+
+  <div class="btns">
+    <button class="primary" id="saveBtn">保存配置</button>
+    <button class="ghost" id="reloadBtn">重新读取</button>
+    <span class="keyhint" id="saveHint"></span>
+  </div>
+
+<script>
+"use strict";
+const $ = (id) => document.getElementById(id);
+const diag = $("diag"), alertBox = $("alertBox");
+
+const OPTS = {
+  mode: [["text","纯文本内存方案（推荐）：读内存 + 纯文本 LLM 决策"],["vision","OpenCV 视觉方案：截图识别 + 视觉模型决策"]],
+  plantingMode: [["mouseclick","模拟鼠标点击（推荐，游戏自管阳光/冷却）"],["putplant","PutPlant 直接注入（副作用多）"]],
+  toolCallMode: [["fc","原生函数调用（function calling）"],["regex","简化正则提取 <tool_call>"]],
+  yesno: [["true","开启"],["false","关闭"]],
+  cardPositionMode: [["opencv","OpenCV 实时扫描（失败回退固定坐标）"],["fixed","固定坐标"]],
+  thinking: [
+    ["","不发送思考参数（服务端默认）"],
+    ["disabled","关闭思考 — DeepSeek / Kimi"],
+    ["enabled","开启思考 — DeepSeek / Kimi"],
+    ["openai","关闭思考 — qwen / silicon（旧版兼容）"],
+    ["openai_thinking","开启思考 — qwen / silicon（旧版兼容）"],
+    ["openai_native","关闭思考 — OpenAI 原生（reasoning_effort=none）"],
+    ["openai_native_thinking","低档思考 — OpenAI 原生（reasoning_effort=low）"],
+    ["openai_native_minimal","最小思考 — OpenAI 原生（reasoning_effort=minimal）"],
+    ["openai_native_minimal_thinking","低档思考 — OpenAI 原生（minimal→low）"],
+    ["claude","关闭思考 — Claude（Anthropic 标准）"],
+    ["claude_thinking","开启思考 — Claude（Anthropic 标准）"],
+    ["gemini","关闭思考 — Gemini 2.5（budget=0）"],
+    ["gemini_thinking","低预算思考 — Gemini 2.5（budget=800）"],
+    ["gemini_3","关闭思考 — Gemini 3（level=low）"],
+    ["gemini_3_thinking","低档思考并透出过程 — Gemini 3"],
+    ["openrouter","关闭思考 — OpenRouter（effort=none）"],
+    ["openrouter_thinking","关闭思考 — OpenRouter（effort=low）"],
+  ],
+};
+for (const [id, list] of Object.entries({ mode: OPTS.mode, plantingMode: OPTS.plantingMode, toolCallMode: OPTS.toolCallMode,
+  autoStart: OPTS.yesno, agentSelects: OPTS.yesno, thinking: OPTS.thinking, textThinking: OPTS.thinking,
+  feedEnabled: OPTS.yesno, nudgeEnabled: OPTS.yesno, sunAutoCollect: OPTS.yesno, scanGrid: OPTS.yesno,
+  scanCards: OPTS.yesno, cardPositionMode: OPTS.cardPositionMode, notifyTerminate: OPTS.yesno, notifyWindowLost: OPTS.yesno })) {
+  $(id).innerHTML = list.map(([v, l]) => `<option value="${v}">${l}</option>`).join("");
+}
+
+const FIELD_MAP = [
+  ["mode", "mode"], ["plantingMode", "planting_mode"], ["toolCallMode", "tool_call_mode"],
+  ["apiBaseurl", "api_base_url"], ["apiModel", "api_model"],
+  ["textApiBaseurl", "text_api_base_url"], ["textApiModel", "text_api_model"],
+  ["thinking", "thinking"], ["textThinking", "text_thinking"],
+  ["nudgeText", "screenshot_nudge_text"], ["windowTitles", null],
+];
+const BOOL_FIELDS = {
+  autoStart: "auto_start", agentSelects: "agent_controls_seed_selection",
+  feedEnabled: "screenshot_feed_enabled", nudgeEnabled: "screenshot_nudge_enabled",
+  sunAutoCollect: "sun_auto_collect", scanGrid: "scan_grid_enabled", scanCards: "scan_cards_enabled",
+  notifyTerminate: "notify_on_terminate", notifyWindowLost: "notify_window_lost",
+};
+const NUM_FIELDS = {
+  feedInterval: "screenshot_feed_interval", nudgeInterval: "screenshot_nudge_interval",
+  maxEdgePx: "screenshot_max_edge_px", jpegQuality: "screenshot_jpeg_quality", maxBytes: "screenshot_max_bytes",
+};
+
+function unwrap(envelope) {
+  return envelope && typeof envelope === "object" && envelope.result && typeof envelope.result === "object"
+    ? envelope.result : envelope;
+}
+async function callAction(actionId, args) {
+  const res = await fetch(`/plugin/pvz_agent/hosted-ui/action/${actionId}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ args: args || {}, kind: "guide", surface_id: "config_panel", locale: "zh-CN" }),
+  });
+  const body = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    const d = body && body.detail;
+    throw new Error(typeof d === "string" ? d : (d && d.message) || `HTTP ${res.status}`);
+  }
+  return unwrap(body);
+}
+
+function applyConfig(cfg) {
+  for (const [elId, key] of FIELD_MAP) if (key && cfg[key] !== undefined && cfg[key] !== null) $(elId).value = String(cfg[key]);
+  for (const [elId, key] of Object.entries(BOOL_FIELDS)) $(elId).value = String(Boolean(cfg[key]));
+  for (const [elId, key] of Object.entries(NUM_FIELDS)) if (cfg[key] !== undefined && cfg[key] !== null) $(elId).value = String(cfg[key]);
+  $("windowTitles").value = Array.isArray(cfg.window_titles) ? cfg.window_titles.join("，") : String(cfg.window_titles || "");
+  $("apiKeyInput").value = ""; $("textApiKeyInput").value = "";
+  $("apiKeyInput").placeholder = cfg.api_key_set ? "留空 = 不修改已保存的密钥" : "粘贴服务密钥（sk-...）";
+  $("apiKeyHint").textContent = cfg.api_key_set ? `已保存（${cfg.api_key_masked}）。留空 = 不修改；输入新值 = 覆盖。` : "尚未设置。密钥保存到插件目录 profiles/default.toml（不进仓库）";
+  $("textApiKeyInput").placeholder = cfg.text_api_key_set ? "留空 = 不修改已保存的密钥" : "粘贴文本模式服务密钥（sk-...）";
+  $("textApiKeyHint").textContent = cfg.text_api_key_set ? `已保存（${cfg.text_api_key_masked}）。留空 = 不修改；输入新值 = 覆盖。` : "尚未设置";
+  $("textApiHint").textContent = cfg.text_api_key_set ? `文本密钥已保存（${cfg.text_api_key_masked}）` : "";
+}
+
+const RETRY_DELAYS_MS = [0, 1500, 3000, 5000, 8000, 12000, 18000, 25000];
+let loadSeq = 0;
+async function loadConfig() {
+  const seq = ++loadSeq;
+  setAlert("", "");
+  for (let attempt = 0; attempt < RETRY_DELAYS_MS.length; attempt++) {
+    if (seq !== loadSeq) return;
+    if (RETRY_DELAYS_MS[attempt] > 0) {
+      diag.textContent = `面板 v8-static · 第 ${attempt + 1} 次尝试（${Math.round(RETRY_DELAYS_MS[attempt] / 1000)}s 后重试）…`;
+      await new Promise((r) => setTimeout(r, RETRY_DELAYS_MS[attempt]));
+    } else {
+      diag.textContent = "面板 v8-static · 正在读取配置…";
+    }
+    if (seq !== loadSeq) return;
+    try {
+      const data = await callAction("pvz_config_get");
+      if (seq !== loadSeq) return;
+      const cfg = data.config || data;
+      applyConfig(cfg);
+      diag.textContent = `面板 v8-static · 数据源 action（${Object.keys(cfg).length} 键 · ${new Date().toLocaleTimeString()}）`;
+      return;
+    } catch (exc) { lastErr = String(exc && exc.message || exc); }
+  }
+  if (seq === loadSeq) {
+    diag.textContent = "面板 v8-static · 加载失败";
+    setAlert(`读取配置失败（已重试）：${lastErr}`, "err");
+  }
+}
+let lastErr = "";
+
+function setAlert(msg, kind) {
+  alertBox.innerHTML = msg ? `<div class="alert ${kind}">${msg.replace(/&/g, "&amp;").replace(/</g, "&lt;")}</div>` : "";
+}
+
+async function saveConfig() {
+  const btn = $("saveBtn"); btn.disabled = true;
+  setAlert("", "");
+  $("saveHint").textContent = "正在保存…";
+  try {
+    const numOrNull = (id) => { const n = Number($(id).value); return Number.isFinite(n) && $(id).value.trim() !== "" ? n : null; };
+    const payload = { mode: $("mode").value, planting_mode: $("plantingMode").value, tool_call_mode: $("toolCallMode").value };
+    for (const [elId, key] of Object.entries(BOOL_FIELDS)) payload[key] = $(elId).value === "true";
+    payload.api_base_url = $("apiBaseurl").value;
+    payload.api_model = $("apiModel").value;
+    payload.api_key = $("apiKeyInput").value;
+    payload.text_api_base_url = $("textApiBaseurl").value;
+    payload.text_api_model = $("textApiModel").value;
+    payload.text_api_key = $("textApiKeyInput").value;
+    payload.thinking = $("thinking").value;
+    payload.text_thinking = $("textThinking").value;
+    payload.screenshot_feed_interval = numOrNull("feedInterval");
+    payload.screenshot_nudge_interval = numOrNull("nudgeInterval");
+    payload.screenshot_nudge_text = $("nudgeText").value;
+    payload.screenshot_max_edge_px = numOrNull("maxEdgePx");
+    payload.screenshot_jpeg_quality = numOrNull("jpegQuality");
+    payload.screenshot_max_bytes = numOrNull("maxBytes");
+    payload.window_titles = $("windowTitles").value.split(/[,，]/).map((s) => s.trim()).filter(Boolean);
+    Object.keys(payload).forEach((k) => payload[k] === null && delete payload[k]);
+
+    const data = await callAction("pvz_config_set", payload);
+    const saved = Array.isArray(data.saved) ? data.saved : [];
+    const keyNote = saved.includes("api_key") ? `（密钥已更新：${data.key_masked || "已打码"}）` : "";
+    setAlert(String(data.summary || "已保存") + keyNote + (data.needs_restart ? " —— 重启插件后生效（插件列表里停止再启动）" : ""), "ok");
+    if (saved.includes("api_key") || saved.includes("text_api_key")) loadConfig();
+  } catch (exc) {
+    setAlert(`保存失败：${exc && exc.message || exc}`, "err");
+  } finally {
+    btn.disabled = false;
+    $("saveHint").textContent = "";
+  }
+}
+$("saveBtn").addEventListener("click", saveConfig);
+$("reloadBtn").addEventListener("click", () => loadConfig());
+loadConfig();
+</script>
+</body>
+</html>
