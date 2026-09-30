@@ -237,9 +237,9 @@ class PvZExecutor:
         # _direct_plants 供"疑似传送带漏判"阳光自愈使用（跨关时由时钟回卷重置）。
         self._direct_plants: int = 0  # 本关已成功直注次数
         self._last_clock: int = -1    # 上一动作的游戏时钟（回卷 = 换关）
-        # 插件侧冷却强制：卡号 → (monotonic 时刻, 冷却秒)。实测游戏的
-        # sc_initial_cd 会随卡槽数组迁移读到 0（写回失效），连种无冷却；
-        # 改为按植物标准冷却在插件侧封卡，任何内存布局下都有效。
+        # 插件侧冷却封卡（仅 putplant 路线）：卡号 → monotonic 就绪时刻。
+        # PutPlant 绕过 UI，游戏不会自己开冷却，需插件按标准冷却表封卡防连种；
+        # mouseclick 路线游戏自管冷却，不使用此表（0.4.1 起）。
         self._card_ready_at: dict[int, float] = {}
 
     def _conveyor_verdict(self, state: Any) -> bool:
@@ -269,14 +269,26 @@ class PvZExecutor:
         except Exception:
             return False
 
+    def _recharge_cs_for(self, plant_type: int, seed: Any) -> int:
+        """植物冷却时长（厘秒）：标准冷却表优先（权威数值）。
+
+        0.4.1 起不再直接采信快照 initial_cd——卡槽数组迁移可能读到 0 或
+        残留脏值，直接采用会把超长冷却写进游戏，表现为"冷却时间一直不变、
+        一直无法种植"。表缺该类型时才用快照兜底，并夹紧到 [1s, 75s]。
+        """
+        cs = _RECHARGE_CS.get(plant_type)
+        if cs is None:
+            cs = int(getattr(seed, "initial_cd", 0) or 0) or 750
+        return max(100, min(int(cs), 7500))
+
     def _write_card_cd_full(self, state: Any, card_index: int, plant_type: int) -> None:
         """PutPlant 绕过 UI：把卡槽冷却写满（sc_initial_cd → sc_cd），游戏内
         冷却条照常显示，模型下一轮也能看到 ⏳。
 
-        initial_cd 优先取本轮快照（与种植决策同源）；实测快照可能为 0——
-        游戏只在冷却真正启动时才写该字段（手动点卡会写，PutPlant 绕过 UI
-        不触发），此时用植物标准冷却表兜底（20:43 前该写法实测有效）。
-        写后回读验证：写不进去（卡槽数组被游戏迁移）会明确记日志。
+        冷却时长取 _recharge_cs_for（标准表优先；快照可能为 0 或脏值——
+        游戏只在冷却真正启动时才写 initial_cd 字段，PutPlant 绕过 UI 不触发，
+        且卡槽数组迁移会读到残留值）。写后回读验证：写不进去（卡槽数组被
+        游戏迁移）会明确记日志。
         """
         if not (self._mem and self._injector):
             return
@@ -284,9 +296,7 @@ class PvZExecutor:
             seeds = getattr(state, "seeds", []) or []
             if card_index < 0 or card_index >= len(seeds):
                 return
-            expected = int(getattr(seeds[card_index], "initial_cd", 0) or 0)
-            if expected <= 0:
-                expected = _RECHARGE_CS.get(plant_type, 750)
+            expected = self._recharge_cs_for(plant_type, seeds[card_index])
             off = self._mem.offsets
             seed_array = self._mem.read_pointer(self._mem.main_object + off.seed_array)
             if not seed_array:
@@ -492,18 +502,6 @@ class PvZExecutor:
         plant_type = seed.imitator_type if seed.imitator_type >= 0 else seed.plant_type
         imitater = seed.imitator_type >= 0
 
-        # 插件侧冷却强制（换关清空；传送带关由喂卡节奏管理，不参与）：
-        # 同一轮动作列表里重复种同一张卡时，state 快照的 cd 仍是 0，
-        # 靠此门限拦截；跨轮由游戏真实冷却（reader 读 cd>0）拦截。
-        if not conveyor:
-            ready_at = self._card_ready_at.get(card_index, 0.0)
-            now = time.monotonic()
-            if now < ready_at:
-                raise ValueError(
-                    f"卡片 [{card_index}]（{seed.name}）冷却中（插件侧限制，还剩 "
-                    f"{ready_at - now:.1f} 秒）——等待冷却或种植其他卡片"
-                )
-
         if self._injector is not None and self._injector.supports_mouse and self._planting_mode == "mouseclick":
             # ============ 主路线（0.3.0 实证零副作用）============
             # 注入 MouseClick 点卡片 + 点格子：游戏自己处理全部 UI 逻辑
@@ -524,11 +522,12 @@ class PvZExecutor:
             self._injector.mouse_click(gx, gy)
             time.sleep(0.3)
             self._direct_plants += 1
-            # 插件侧封卡（同轮防连种；跨轮由游戏真实冷却接管）。
-            recharge_cs = int(getattr(seed, "initial_cd", 0) or 0)
-            if recharge_cs <= 0:
-                recharge_cs = _RECHARGE_CS.get(plant_type, 750)
-            self._card_ready_at[card_index] = time.monotonic() + recharge_cs / 100.0
+            # 冷却完全由游戏接管：MouseClick 点卡即开游戏真实冷却，跨轮由
+            # reader 读 cd>0 拦截（剩余时间为真实递减值）。插件侧不封卡——
+            # 此前按 initial_cd 快照封 7.5s，而快照不可靠（常读到 0，见
+            # _write_card_cd_full 注释），长冷却植物会陷入"锁到期→点击被
+            # 游戏拒绝→再封 7.5s"循环：剩余时间显示永远不变且一直种不下
+            # （0.4.1 实测）。同轮重复种植由游戏自己拒绝（点击无效果）。
             # 种后轻验证：游戏拒绝（阳光/冷却/占用）时点击不产生植物
             if self._cell_occupied(row, col):
                 result["detail"] = (
@@ -552,6 +551,17 @@ class PvZExecutor:
                 raise ValueError(
                     f"卡片 [{card_index}] 的植物类型异常（{plant_type}），放弃直接注入以防崩溃"
                 )
+            # 插件侧冷却强制（仅 putplant 走此门限）：PutPlant 绕过 UI，游戏
+            # 不会自己开冷却，需插件封卡防连种（换关清空；传送带关由喂卡节奏
+            # 管理，不参与）。mouseclick 模式游戏自管冷却，不经过这里。
+            if not conveyor:
+                ready_at = self._card_ready_at.get(card_index, 0.0)
+                now = time.monotonic()
+                if now < ready_at:
+                    raise ValueError(
+                        f"卡片 [{card_index}]（{seed.name}）冷却中（插件侧限制，还剩 "
+                        f"{ready_at - now:.1f} 秒）——等待冷却或种植其他卡片"
+                    )
             sun_cost = 0 if conveyor else seed.sun_cost
             logger.info("[PvZ执行] 💉 直接注入 PutPlant 行%s列%s type=%s imitater=%s 阳光=%s",
                         row, col, plant_type, imitater, sun_cost)
@@ -562,11 +572,10 @@ class PvZExecutor:
             time.sleep(0.3)
             if self._cell_occupied(row, col):
                 self._direct_plants += 1
-                # 手动冷却写回 + 插件侧封卡（标准冷却表兜底）
-                recharge_cs = int(getattr(seed, "initial_cd", 0) or 0)
-                if recharge_cs <= 0:
-                    recharge_cs = _RECHARGE_CS.get(plant_type, 750)
-                self._card_ready_at[card_index] = time.monotonic() + recharge_cs / 100.0
+                # 插件侧封卡（同轮防连种；跨轮由写回的游戏真实冷却接管）
+                self._card_ready_at[card_index] = (
+                    time.monotonic() + self._recharge_cs_for(plant_type, seed) / 100.0
+                )
                 if not conveyor:
                     self._write_card_cd_full(state, card_index, plant_type)
                 result["detail"] = f"种植 {seed.name} 到 行{row}列{col} (直接注入)"
