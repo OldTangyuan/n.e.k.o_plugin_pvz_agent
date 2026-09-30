@@ -1,4 +1,4 @@
-﻿import {
+import {
   Alert,
   Button,
   ButtonGroup,
@@ -199,6 +199,7 @@ export default function PvZAgentConfigPanel(props: PluginSurfaceProps) {
   const [form, setForm] = useState<FormState>(EMPTY_FORM)
   const loadingRef = useRef(false)
   const unmountedRef = useRef(false)
+  const [diag, setDiag] = useState("面板 v7 · 初始化中…")
 
   const set = (patch: Partial<FormState>) => setForm((prev) => ({ ...prev, ...patch }))
 
@@ -212,30 +213,52 @@ export default function PvZAgentConfigPanel(props: PluginSurfaceProps) {
         : undefined
     if (stateConfig && typeof stateConfig === "object") {
       set(configToFormPatch(stateConfig as Record<string, any>))
+      setDiag(`面板 v7 · 数据源 state（${Object.keys(stateConfig).length} 键）`)
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [props.state])
 
+  // 初始加载：插件运行时刚（重）启动后有数秒"无 entry"死窗，action 会 404——
+  // 带退避重试跨过死窗（总时长约 40 秒），期间 state 回流也能填充表单。
+  const RETRY_DELAYS_MS = [0, 1500, 3000, 5000, 8000, 12000, 18000, 25000]
   const loadConfig = async () => {
     if (loadingRef.current || unmountedRef.current) return
     loadingRef.current = true
     set({ loading: true, error: "", message: "" })
+    let lastError = ""
     try {
-      const envelope = await props.api.call("pvz_config_get")
-      if (unmountedRef.current) return
-      const data = unwrapActionResult(envelope)
-      set({ loading: false, error: "", ...configToFormPatch(data.config || data) })
-    } catch (exc: any) {
-      if (unmountedRef.current) return
-      // action 失败时回退用 context 里的配置（面板打开时序免疫）
+      for (let attempt = 0; attempt < RETRY_DELAYS_MS.length; attempt++) {
+        const delay = RETRY_DELAYS_MS[attempt]
+        if (delay > 0) {
+          setDiag(`面板 v7 · 第 ${attempt + 1} 次尝试（插件运行时可能还在启动，${Math.round(delay / 1000)}s 后重试）…`)
+          await new Promise((r) => setTimeout(r, delay))
+          if (unmountedRef.current) return
+        } else {
+          setDiag(`面板 v7 · 正在读取配置…`)
+        }
+        try {
+          const envelope = await props.api.call("pvz_config_get")
+          if (unmountedRef.current) return
+          const data = unwrapActionResult(envelope)
+          const cfg = data.config || data
+          set({ loading: false, error: "", ...configToFormPatch(cfg) })
+          setDiag(`面板 v7 · 数据源 action（${Object.keys(cfg).length} 键 · ${new Date().toLocaleTimeString()}）`)
+          return
+        } catch (exc: any) {
+          lastError = String(exc?.message || exc)
+        }
+      }
+      // 重试穷尽：回退 state，再不行才显示错误
       const stateConfig =
         (props as any).state && typeof (props as any).state === "object"
           ? ((props as any).state as Record<string, any>).config
           : undefined
       if (stateConfig && typeof stateConfig === "object") {
         set({ loading: false, error: "", ...configToFormPatch(stateConfig as Record<string, any>) })
+        setDiag(`面板 v7 · 数据源 state（action 重试穷尽：${lastError}）`)
       } else {
-        set({ loading: false, error: String(exc?.message || exc) })
+        set({ loading: false, error: `读取配置失败（已重试）：${lastError}` })
+        setDiag(`面板 v7 · 加载失败`)
       }
     } finally {
       loadingRef.current = false
@@ -322,6 +345,7 @@ export default function PvZAgentConfigPanel(props: PluginSurfaceProps) {
 
   return (
     <Page title="PVZ 配置面板" subtitle="覆盖 plugin.toml [pvz_agent] 的全部配置项；保存写入 profiles/default.toml。">
+      <Text tone={phaseTone as any}>{diag}</Text>
       {form.error ? <Alert tone="danger">{form.error}</Alert> : null}
       {form.message ? <Alert tone="success">{form.message}</Alert> : null}
 
