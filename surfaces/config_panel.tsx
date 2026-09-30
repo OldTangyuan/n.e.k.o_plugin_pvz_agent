@@ -1,4 +1,4 @@
-import {
+﻿import {
   Alert,
   Button,
   ButtonGroup,
@@ -154,12 +154,67 @@ function unwrapActionResult(envelope: any): Record<string, any> {
   return {}
 }
 
+// 把配置载荷（pvz_config_get 的 config / props.state.config 同款结构）刷进表单。
+function configToFormPatch(data: Record<string, any>): Partial<FormState> {
+  const boolStr = (v: any, dflt: boolean) =>
+    v === undefined || v === null ? String(dflt) : String(Boolean(v))
+  return {
+    mode: String(data.mode || "text"),
+    plantingMode: String(data.planting_mode || "mouseclick"),
+    toolCallMode: String(data.tool_call_mode || "fc"),
+    autoStart: boolStr(data.auto_start, false),
+    agentSelects: boolStr(data.agent_controls_seed_selection, false),
+    apiBaseurl: String(data.api_base_url || ""),
+    apiModel: String(data.api_model || ""),
+    apiKeyInput: "",
+    textApiBaseurl: String(data.text_api_base_url || ""),
+    textApiModel: String(data.text_api_model || ""),
+    textApiKeyInput: "",
+    thinking: String(data.thinking || ""),
+    textThinking: String(data.text_thinking || ""),
+    feedEnabled: boolStr(data.screenshot_feed_enabled, true),
+    feedInterval: String(data.screenshot_feed_interval ?? 8),
+    nudgeEnabled: boolStr(data.screenshot_nudge_enabled, true),
+    nudgeInterval: String(data.screenshot_nudge_interval ?? 5),
+    nudgeText: String(data.screenshot_nudge_text || ""),
+    maxEdgePx: String(data.screenshot_max_edge_px ?? 0),
+    jpegQuality: String(data.screenshot_jpeg_quality ?? 95),
+    windowTitles: Array.isArray(data.window_titles)
+      ? (data.window_titles as string[]).join("，")
+      : String(data.window_titles || ""),
+    sunAutoCollect: boolStr(data.sun_auto_collect, true),
+    scanGrid: boolStr(data.scan_grid_enabled, true),
+    scanCards: boolStr(data.scan_cards_enabled, true),
+    cardPositionMode: String(data.card_position_mode || "opencv"),
+    notifyTerminate: boolStr(data.notify_on_terminate, true),
+    notifyWindowLost: boolStr(data.notify_window_lost, true),
+    apiKeySet: Boolean(data.api_key_set),
+    apiKeyMasked: String(data.api_key_masked || ""),
+    textApiKeySet: Boolean(data.text_api_key_set),
+    textApiKeyMasked: String(data.text_api_key_masked || ""),
+  }
+}
+
 export default function PvZAgentConfigPanel(props: PluginSurfaceProps) {
   const [form, setForm] = useState<FormState>(EMPTY_FORM)
   const loadingRef = useRef(false)
   const unmountedRef = useRef(false)
 
   const set = (patch: Partial<FormState>) => setForm((prev) => ({ ...prev, ...patch }))
+
+  // 宿主在每次打开/刷新面板时都会带上 context（config_panel_ui_context 返回的
+  // config）——挂载时同步吃 props.state.config，不依赖 action 调用时序；
+  // state 后续更新（api.refresh）也会自动回流。
+  useEffect(() => {
+    const stateConfig =
+      (props as any).state && typeof (props as any).state === "object"
+        ? ((props as any).state as Record<string, any>).config
+        : undefined
+    if (stateConfig && typeof stateConfig === "object") {
+      set(configToFormPatch(stateConfig as Record<string, any>))
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [props.state])
 
   const loadConfig = async () => {
     if (loadingRef.current || unmountedRef.current) return
@@ -169,48 +224,19 @@ export default function PvZAgentConfigPanel(props: PluginSurfaceProps) {
       const envelope = await props.api.call("pvz_config_get")
       if (unmountedRef.current) return
       const data = unwrapActionResult(envelope)
-      const boolStr = (v: any, dflt: boolean) =>
-        v === undefined || v === null ? String(dflt) : String(Boolean(v))
-      set({
-        loading: false,
-        error: "",
-        mode: String(data.mode || "text"),
-        plantingMode: String(data.planting_mode || "mouseclick"),
-        toolCallMode: String(data.tool_call_mode || "fc"),
-        autoStart: boolStr(data.auto_start, false),
-        agentSelects: boolStr(data.agent_controls_seed_selection, false),
-        apiBaseurl: String(data.api_base_url || ""),
-        apiModel: String(data.api_model || ""),
-        apiKeyInput: "",
-        textApiBaseurl: String(data.text_api_base_url || ""),
-        textApiModel: String(data.text_api_model || ""),
-        textApiKeyInput: "",
-        thinking: String(data.thinking || ""),
-        textThinking: String(data.text_thinking || ""),
-        feedEnabled: boolStr(data.screenshot_feed_enabled, true),
-        feedInterval: String(data.screenshot_feed_interval ?? 8),
-        nudgeEnabled: boolStr(data.screenshot_nudge_enabled, true),
-        nudgeInterval: String(data.screenshot_nudge_interval ?? 5),
-        nudgeText: String(data.screenshot_nudge_text || ""),
-        maxEdgePx: String(data.screenshot_max_edge_px ?? 0),
-        jpegQuality: String(data.screenshot_jpeg_quality ?? 95),
-        windowTitles: Array.isArray(data.window_titles)
-          ? (data.window_titles as string[]).join("，")
-          : String(data.window_titles || ""),
-        sunAutoCollect: boolStr(data.sun_auto_collect, true),
-        scanGrid: boolStr(data.scan_grid_enabled, true),
-        scanCards: boolStr(data.scan_cards_enabled, true),
-        cardPositionMode: String(data.card_position_mode || "opencv"),
-        notifyTerminate: boolStr(data.notify_on_terminate, true),
-        notifyWindowLost: boolStr(data.notify_window_lost, true),
-        apiKeySet: Boolean(data.api_key_set),
-        apiKeyMasked: String(data.api_key_masked || ""),
-        textApiKeySet: Boolean(data.text_api_key_set),
-        textApiKeyMasked: String(data.text_api_key_masked || ""),
-      })
+      set({ loading: false, error: "", ...configToFormPatch(data.config || data) })
     } catch (exc: any) {
       if (unmountedRef.current) return
-      set({ loading: false, error: String(exc?.message || exc) })
+      // action 失败时回退用 context 里的配置（面板打开时序免疫）
+      const stateConfig =
+        (props as any).state && typeof (props as any).state === "object"
+          ? ((props as any).state as Record<string, any>).config
+          : undefined
+      if (stateConfig && typeof stateConfig === "object") {
+        set({ loading: false, error: "", ...configToFormPatch(stateConfig as Record<string, any>) })
+      } else {
+        set({ loading: false, error: String(exc?.message || exc) })
+      }
     } finally {
       loadingRef.current = false
     }
@@ -272,6 +298,12 @@ export default function PvZAgentConfigPanel(props: PluginSurfaceProps) {
           String(data.summary || "已保存") +
           (data.needs_restart ? "——重启插件后生效（插件列表里停止再启动）" : ""),
       })
+      // 官方刷新通道：宿主重取 context，props.state.config 同步回流
+      try {
+        await props.api.refresh()
+      } catch (_) {
+        /* 刷新失败不影响保存结果 */
+      }
     } catch (exc: any) {
       if (unmountedRef.current) return
       set({ saving: false, error: String(exc?.message || exc) })
@@ -279,6 +311,7 @@ export default function PvZAgentConfigPanel(props: PluginSurfaceProps) {
   }
 
   useEffect(() => {
+    // 挂载时的 action 加载只是兜底（props.state.config 通常已带全量配置）
     loadConfig()
     return () => {
       unmountedRef.current = true

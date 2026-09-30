@@ -247,11 +247,37 @@ class PVZAgentPlugin(NekoPluginBase):
 
     @ui.context(id="config_panel", title="PVZ Agent 配置")
     def config_panel_ui_context(self, **_):
-        """配置面板 surface 的上下文 provider（轻量快照；缺了同样必败）。"""
+        """配置面板 surface 的上下文 provider。
+
+        返回完整配置快照（config 键 = pvz_config_get 同款载荷）：面板挂载时
+        同步读 props.state.config，不再依赖 action 调用时序——面板在运行时
+        未就绪时打开也不会"清空"。密钥仍只带打码摘要。
+        """
         try:
-            return {"status": self._service.get_status(), "plugin_started": self._started}
+            return {
+                "config": self._build_config_payload(),
+                "plugin_started": self._started,
+            }
         except Exception:
-            return {"status": {}, "plugin_started": False}
+            return {"config": {}, "plugin_started": False}
+
+    def _build_config_payload(self) -> JsonObject:
+        """构建配置载荷（pvz_config_get / config_panel context 共用）。
+
+        合并视图 + 密钥打码摘要；_cfg 缺失的键用 profile 现值兜底补齐。
+        """
+        cfg = dict(self._cfg or {})
+        for key, value in _read_profile_section().items():
+            if key not in cfg:
+                cfg[key] = value
+        data: JsonObject = {k: v for k, v in cfg.items() if k not in _CONFIG_SECRET_KEYS}
+        merged_key = str(cfg.get("api_key", "") or "").strip()
+        merged_text_key = str(cfg.get("text_api_key", "") or "").strip()
+        data["api_key_masked"] = _mask_secret(merged_key)
+        data["api_key_set"] = bool(merged_key)
+        data["text_api_key_masked"] = _mask_secret(merged_text_key)
+        data["text_api_key_set"] = bool(merged_text_key)
+        return data
 
     def _write_profile_section(self, section: str, updates: JsonObject) -> Path:
         """把 updates 合并进 profiles/default.toml 的 [section] 段（其余段原样保留）。
@@ -676,20 +702,7 @@ class PVZAgentPlugin(NekoPluginBase):
     )
     async def pvz_config_get(self, **_: Any):
         async def _run():
-            cfg = dict(self._cfg or {})
-            # 兜底：_cfg 缺失的键用 profile 现值补（防运行中被重置后读到空）
-            for key, value in _read_profile_section().items():
-                if key not in cfg:
-                    cfg[key] = value
-            data: JsonObject = {k: v for k, v in cfg.items() if k not in _CONFIG_SECRET_KEYS}
-            # 密钥：明文不出插件，回打码摘要 + 是否已设置
-            merged_key = str(cfg.get("api_key", "") or "").strip()
-            merged_text_key = str(cfg.get("text_api_key", "") or "").strip()
-            data["api_key_masked"] = _mask_secret(merged_key)
-            data["api_key_set"] = bool(merged_key)
-            data["text_api_key_masked"] = _mask_secret(merged_text_key)
-            data["text_api_key_set"] = bool(merged_text_key)
-            return {"config": data}
+            return {"config": self._build_config_payload()}
 
         return await self._run_entry(_run)
 
