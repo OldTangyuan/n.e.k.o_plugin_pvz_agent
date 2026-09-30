@@ -50,6 +50,16 @@
     button.ghost { border-color: #4a4f59; }
   }
   .keyhint { font-size: 12px; color: #7a8090; }
+  .badge {
+    display: inline-block; margin-left: 8px; padding: 1px 9px; border-radius: 20px;
+    font-size: 12px; font-weight: 600; font-family: Consolas, monospace; vertical-align: middle;
+  }
+  .badge.on { background: #e7f7ec; color: #17703a; border: 1px solid #b7e4c7; }
+  .badge.off { background: #f1f2f5; color: #8a8f9a; border: 1px solid #d9dce2; }
+  @media (prefers-color-scheme: dark) {
+    .badge.on { background: #14301f; color: #7fd8a2; border-color: #235c38; }
+    .badge.off { background: #26282e; color: #7a8090; border-color: #3a3e47; }
+  }
 </style>
 </head>
 <body>
@@ -77,7 +87,7 @@
       <div class="help">OpenAI 兼容接口地址，如 https://api.deepseek.com</div></div>
     <div class="grid2">
       <div class="row"><label>模型名 (api_model)</label><input id="apiModel" placeholder="如 deepseek-chat / gpt-4o-mini"></div>
-      <div class="row"><label>API 密钥 (api_key)</label><input id="apiKeyInput" type="password" placeholder="">
+      <div class="row"><label>API 密钥 (api_key)<span class="badge off" id="apiKeyBadge">未设置</span></label><input id="apiKeyInput" type="password" placeholder="">
         <div class="help keyhint" id="apiKeyHint">留空 = 不修改已保存密钥</div></div>
     </div>
     <div class="grid2">
@@ -89,7 +99,7 @@
         <div class="help keyhint" id="textApiHint"></div></div>
       <div class="row"><label>文本模式模型名 (text_api_model)</label><input id="textApiModel" placeholder="留空 = 复用上面的模型"></div>
     </div>
-    <div class="row"><label>文本模式密钥 (text_api_key)</label><input id="textApiKeyInput" type="password" placeholder="">
+    <div class="row"><label>文本模式密钥 (text_api_key)<span class="badge off" id="textApiKeyBadge">未设置</span></label><input id="textApiKeyInput" type="password" placeholder="">
       <div class="help keyhint" id="textApiKeyHint">留空 = 不修改已保存密钥</div></div>
   </div>
 
@@ -210,11 +220,17 @@ function applyConfig(cfg) {
   for (const [elId, key] of Object.entries(NUM_FIELDS)) if (cfg[key] !== undefined && cfg[key] !== null) $(elId).value = String(cfg[key]);
   $("windowTitles").value = Array.isArray(cfg.window_titles) ? cfg.window_titles.join("，") : String(cfg.window_titles || "");
   $("apiKeyInput").value = ""; $("textApiKeyInput").value = "";
-  $("apiKeyInput").placeholder = cfg.api_key_set ? "留空 = 不修改已保存的密钥" : "粘贴服务密钥（sk-...）";
-  $("apiKeyHint").textContent = cfg.api_key_set ? `已保存（${cfg.api_key_masked}）。留空 = 不修改；输入新值 = 覆盖。` : "尚未设置。密钥保存到插件目录 profiles/default.toml（不进仓库）";
-  $("textApiKeyInput").placeholder = cfg.text_api_key_set ? "留空 = 不修改已保存的密钥" : "粘贴文本模式服务密钥（sk-...）";
-  $("textApiKeyHint").textContent = cfg.text_api_key_set ? `已保存（${cfg.text_api_key_masked}）。留空 = 不修改；输入新值 = 覆盖。` : "尚未设置";
-  $("textApiHint").textContent = cfg.text_api_key_set ? `文本密钥已保存（${cfg.text_api_key_masked}）` : "";
+  // 密钥状态徽章：密码输入框永远留空（设计如此），是否已保存看徽章
+  const keyBadge = $("apiKeyBadge");
+  keyBadge.textContent = cfg.api_key_set ? `已保存 ${cfg.api_key_masked || ""}` : "未设置";
+  keyBadge.className = "badge " + (cfg.api_key_set ? "on" : "off");
+  $("apiKeyInput").placeholder = cfg.api_key_set ? "已保存（见上方徽章）· 留空 = 不修改；输入新值 = 覆盖" : "粘贴服务密钥（sk-...）";
+  $("apiKeyHint").textContent = cfg.api_key_set ? "留空 = 不修改；输入新值 = 覆盖。密钥保存在插件目录 profiles/default.toml（不进仓库）" : "尚未设置。密钥保存到插件目录 profiles/default.toml（不进仓库）";
+  const textBadge = $("textApiKeyBadge");
+  textBadge.textContent = cfg.text_api_key_set ? `已保存 ${cfg.text_api_key_masked || ""}` : "未设置（复用主密钥）";
+  textBadge.className = "badge " + (cfg.text_api_key_set ? "on" : "off");
+  $("textApiKeyInput").placeholder = cfg.text_api_key_set ? "已保存（见上方徽章）· 留空 = 不修改；输入新值 = 覆盖" : "粘贴文本模式服务密钥（sk-...）";
+  $("textApiKeyHint").textContent = cfg.text_api_key_set ? "留空 = 不修改；输入新值 = 覆盖" : "尚未设置：文本模式将复用上面的 api_key";
 }
 
 const RETRY_DELAYS_MS = [0, 1500, 3000, 5000, 8000, 12000, 18000, 25000];

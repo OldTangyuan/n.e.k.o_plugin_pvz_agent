@@ -233,18 +233,6 @@ class PVZAgentPlugin(NekoPluginBase):
         self._started = False
         return Ok({"status": "shutdown"})
 
-    @ui.context(id="quickstart", title="PVZ Agent 状态")
-    def quickstart_ui_context(self, **_):
-        """插件面板 quickstart surface 的只读上下文 provider。
-
-        host 的 get_ui_context 需要它（surface 没声明 context 时取 surface id），
-        缺了会报 "UI context not found" 连带 action 列表拿不到。返回轻量快照即可。
-        """
-        try:
-            return {"status": self._service.get_status()}
-        except Exception:
-            return {"status": {}}
-
     @ui.context(id="config_panel", title="PVZ Agent 配置")
     def config_panel_ui_context(self, **_):
         """配置面板 surface 的上下文 provider。
