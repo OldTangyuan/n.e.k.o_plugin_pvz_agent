@@ -26,3 +26,13 @@ profiles/*.toml
 # 插件内置原生依赖必须随市场包分发（上面的 *.py[cod] 会误伤 .pyd，负向排除）
 !pvz/vendor/**/*.pyd
 !pvz/vendor/**/*.dll
+
+# 会话级调试/临时脚本与本地产物（不入库）
+.tmptest/
+.tmptest_route/
+.pytest-tmp*/
+.pytest-cache*
+pytest-cache-files-*/
+.uv-cache-tmp/
+.uv-tools-tmp/
+uv.lock

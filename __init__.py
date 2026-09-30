@@ -233,24 +233,20 @@ class PVZAgentPlugin(NekoPluginBase):
         self._started = False
         return Ok({"status": "shutdown"})
 
-    @ui.context(id="config_panel", title="PVZ Agent 配置")
-    def config_panel_ui_context(self, **_):
-        """配置面板 surface 的上下文 provider。
+    @ui.context(id="quickstart", title="PVZ Agent 状态")
+    def quickstart_ui_context(self, **_):
+        """插件面板 quickstart surface 的只读上下文 provider。
 
-        返回完整配置快照（config 键 = pvz_config_get 同款载荷）：面板挂载时
-        同步读 props.state.config，不再依赖 action 调用时序——面板在运行时
-        未就绪时打开也不会"清空"。密钥仍只带打码摘要。
+        host 的 get_ui_context 需要它（surface 没声明 context 时取 surface id），
+        缺了会报 "UI context not found" 连带 action 列表拿不到。返回轻量快照即可。
         """
         try:
-            return {
-                "config": self._build_config_payload(),
-                "plugin_started": self._started,
-            }
+            return {"status": self._service.get_status()}
         except Exception:
-            return {"config": {}, "plugin_started": False}
+            return {"status": {}}
 
     def _build_config_payload(self) -> JsonObject:
-        """构建配置载荷（pvz_config_get / config_panel context 共用）。
+        """构建配置载荷（pvz_config_get 用，静态配置面板经 action 拉取）。
 
         合并视图 + 密钥打码摘要；_cfg 缺失的键用 profile 现值兜底补齐。
         """

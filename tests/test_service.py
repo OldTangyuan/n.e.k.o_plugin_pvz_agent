@@ -1398,12 +1398,13 @@ def test_handle_no_actions_after_actions_resets() -> None:
 
 
 # --------------------------------------------------------------------------- #
-#  facade：hosted UI 配置面板注册
+#  facade：hosted UI 教程面板注册（配置表单在 static/index.html，经 action 调用）
 # --------------------------------------------------------------------------- #
 def test_ui_context_and_actions_registered() -> None:
-    ctx = getattr(PVZAgentPlugin.config_panel_ui_context, UI_CONTEXT_META_ATTR, None)
-    assert ctx is not None and ctx["id"] == "config_panel"
-    for name in ("pvz_config_get", "pvz_config_set"):
+    ctx = getattr(PVZAgentPlugin.quickstart_ui_context, UI_CONTEXT_META_ATTR, None)
+    assert ctx is not None and ctx["id"] == "quickstart"
+    for name in ("pvz_get_status", "pvz_start", "pvz_pause", "pvz_stop",
+                 "pvz_config_get", "pvz_config_set"):
         meta = getattr(getattr(PVZAgentPlugin, name), UI_ACTION_META_ATTR, None)
         assert meta is not None, name
-    assert not hasattr(PVZAgentPlugin, "quickstart_ui_context")
+    assert not hasattr(PVZAgentPlugin, "config_panel_ui_context")

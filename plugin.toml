@@ -123,13 +123,19 @@ notify_window_lost = true
 [plugin.ui]
 enabled = true
 
-# 插件面板「配置面板」：全部 [pvz_agent] 配置项的表单（保存到
-# profiles/default.toml，与宿主 GUI 配置界面同一文件，重启插件生效）。
-# 注：另有 static/index.html 静态面板（/plugin/pvz_agent/ui/），不依赖
-# hosted 桥接，宿主经 ui-info 自动识别，无需在此声明。
+# 插件面板「快速开始」教程（hosted-tsx surface，前端运行时编译）。
+# 指向 @ui.context(id="quickstart") provider；缺了 host 的 get_ui_context 会报
+# "UI context not found"，api.call 拿不到 action 列表必败。
+# permissions 授权 surface 经 props.api.call 调插件 entry（pvz_get_status /
+# pvz_start / pvz_pause / pvz_stop / pvz_select_window，均需 @ui.action 暴露）。
 [[plugin.ui.guide]]
-id = "config_panel"
-title = "配置面板"
-entry = "surfaces/config_panel.tsx"
-context = "config_panel"
+id = "quickstart"
+title = "快速开始"
+entry = "surfaces/quickstart.tsx"
+context = "quickstart"
 permissions = ["state:read", "action:call"]
+
+# 配置表单在 static/index.html（/plugin/pvz_agent/ui/），不依赖 hosted 桥接，
+# 宿主经 ui-info 自动识别，不在此声明。其 action 调用沿用 quickstart surface
+# 的 action:call 授权（hosted-ui/action 按 surface 权限校验，静态面板无独立
+# 授权身份，见 static/index.html 内注释）。

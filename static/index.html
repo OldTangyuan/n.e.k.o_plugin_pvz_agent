@@ -201,10 +201,13 @@ function unwrap(envelope) {
     ? envelope.result : envelope;
 }
 async function callAction(actionId, args) {
+  // surface 鉴权：hosted-ui/action 按 surface 权限校验，静态面板（panel:main）
+  // 没有 action:call 授权，因此沿用 quickstart surface 的授权身份——该 surface
+  // 在 plugin.toml 里声明了 permissions=["state:read","action:call"]。
   const res = await fetch(`/plugin/pvz_agent/hosted-ui/action/${actionId}`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ args: args || {}, kind: "guide", surface_id: "config_panel", locale: "zh-CN" }),
+    body: JSON.stringify({ args: args || {}, kind: "guide", surface_id: "quickstart", locale: "zh-CN" }),
   });
   const body = await res.json().catch(() => ({}));
   if (!res.ok) {

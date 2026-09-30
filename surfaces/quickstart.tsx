@@ -1,0 +1,300 @@
+import {
+  ActionButton,
+  Alert,
+  Button,
+  ButtonGroup,
+  Card,
+  Grid,
+  KeyValue,
+  Page,
+  Stack,
+  StatCard,
+  Step,
+  Steps,
+  Text,
+  Warning,
+  useEffect,
+  useRef,
+  useState,
+} from "@neko/plugin-ui"
+import type { PluginSurfaceProps, Tone } from "@neko/plugin-ui"
+
+// PVZ 游玩助手插件面板「快速开始」教程 + 状态控制。zh-CN 单语言。
+// 配置表单已移至独立的「配置面板」（static/index.html，/plugin/pvz_agent/ui/），
+// 本面板只保留教程、状态与窗口管理。通过 props.api.call 调插件 entry
+// （需在 __init__.py 用 @ui.action 暴露）。
+
+const STATUS_REFRESH_INTERVAL_MS = 5000
+
+// phase 中文映射，避免把 idle/running 等英文直接丢给用户。
+const PHASE_LABEL: Record<string, string> = {
+  idle: "空闲",
+  running: "游玩中",
+  paused: "已暂停",
+  stopping: "停止中",
+  error: "出错",
+}
+
+type StatusState = {
+  loading: boolean
+  phase: string
+  ready: boolean
+  windowFound: boolean
+  windowTitle: string
+  windowHwnd: number | null
+  windows: { hwnd: number; title: string }[]
+  selectingHwnd: number | null
+  steps: number
+  goal: string
+  error: string
+  notRunning: boolean
+}
+
+// 解包 hosted-surface action 返回的 envelope（{plugin_id, action_id, result}）。
+function unwrapActionResult(envelope: any): Record<string, any> {
+  if (envelope && typeof envelope === "object") {
+    if (envelope.result && typeof envelope.result === "object") return envelope.result
+    return envelope
+  }
+  return {}
+}
+
+export default function PvZAgentQuickstart(props: PluginSurfaceProps) {
+  const [state, setState] = useState<StatusState>({
+    loading: false,
+    phase: "",
+    ready: false,
+    windowFound: false,
+    windowTitle: "",
+    windowHwnd: null,
+    windows: [],
+    selectingHwnd: null,
+    steps: 0,
+    goal: "",
+    error: "",
+    notRunning: false,
+  })
+  const refreshingRef = useRef(false)
+  const selectingRef = useRef(false)
+  const unmountedRef = useRef(false)
+
+  const refresh = async () => {
+    if (refreshingRef.current || unmountedRef.current) return
+    refreshingRef.current = true
+    setState((prev) => ({ ...prev, loading: true, error: "" }))
+    try {
+      // Hosted surface 在 sandbox iframe 里，不能直接 fetch；用 props.api.call
+      // 桥接到宿主调插件 entry（需要 permissions=["action:call"] + @ui.action）。
+      const envelope = await props.api.call("pvz_get_status")
+      if (unmountedRef.current) return
+      const data = unwrapActionResult(envelope)
+      const win = data.window && typeof data.window === "object" ? data.window : {}
+      const windows = (Array.isArray(data.windows) ? data.windows : [])
+        .filter((w: any) => w && typeof w === "object")
+        .map((w: any) => ({ hwnd: Number(w.hwnd), title: String(w.title || "") }))
+      setState({
+        loading: false,
+        phase: String(data.phase || ""),
+        ready: Boolean(data.ready),
+        windowFound: Boolean(win.found),
+        windowTitle: String(win.title || ""),
+        windowHwnd: win.hwnd == null ? null : Number(win.hwnd),
+        windows,
+        selectingHwnd: null,
+        steps: Number(data.steps || 0),
+        goal: String(data.goal || ""),
+        error: "",
+        notRunning: false,
+      })
+    } catch (exc: any) {
+      if (unmountedRef.current) return
+      const raw = String(exc?.message || exc)
+      const notRunning = /PLUGIN_NOT_RUNNING|not running|not started/i.test(raw)
+      setState((prev) => ({
+        ...prev,
+        loading: false,
+        error: notRunning ? "" : raw,
+        notRunning,
+      }))
+    } finally {
+      refreshingRef.current = false
+    }
+  }
+
+  useEffect(() => {
+    refresh()
+    const timer = window.setInterval(refresh, STATUS_REFRESH_INTERVAL_MS)
+    return () => {
+      unmountedRef.current = true
+      window.clearInterval(timer)
+    }
+  }, [])
+
+  // 手动切换游玩目标窗口（pvz_select_window：hwnd 取状态 windows 列表里的句柄）。
+  const selectWindow = async (hwnd: number) => {
+    if (selectingRef.current || unmountedRef.current) return
+    selectingRef.current = true
+    setState((prev) => ({ ...prev, selectingHwnd: hwnd }))
+    try {
+      await props.api.call("pvz_select_window", { hwnd })
+    } catch {
+      // 失败不打断：随后的 refresh 会带回最新状态/错误。
+    } finally {
+      selectingRef.current = false
+      if (!unmountedRef.current) await refresh()
+    }
+  }
+
+  const phaseTone: Tone =
+    state.phase === "running" ? "success" : state.phase === "paused" ? "warning" : "default"
+
+  return (
+    <Page title="PVZ 游玩助手" subtitle="让猫娘自己玩《植物大战僵尸》。">
+      {state.notRunning ? (
+        <Alert tone="warning">
+          插件当前未运行。请先在插件列表里启动「PVZ Agent」，再回来刷新状态。
+        </Alert>
+      ) : null}
+
+      <Alert tone="info">
+        AI 服务（地址 / 模型 / 密钥 / 思考参数 / 全部玩法开关）的配置已移至独立的
+        **「配置面板」**：插件页的面板入口，或浏览器打开 /plugin/pvz_agent/ui/。
+      </Alert>
+
+      <Card title="游玩状态">
+        <Stack>
+          <Grid cols={3}>
+            <StatCard label="游玩状态" value={PHASE_LABEL[state.phase] || state.phase || "未知"} />
+            <StatCard label="AI 决策" value={state.ready ? "就绪" : "未就绪"} />
+            <StatCard label="已执行动作" value={state.steps} />
+          </Grid>
+          <Text>游戏窗口：{state.windowFound ? state.windowTitle : "未找到"}</Text>
+          <Text>目标：{state.goal || "未设置"}</Text>
+          {state.error ? <Alert tone="danger">{state.error}</Alert> : null}
+          <ButtonGroup>
+            <Button onClick={refresh}>{state.loading ? "刷新中…" : "刷新"}</Button>
+            <ActionButton
+              actionId="pvz_start"
+              label="开始游玩"
+              tone="primary"
+              args={{ goal: "自动玩完当前这一关并尽可能取得胜利" }}
+            />
+            <ActionButton actionId="pvz_pause" label="暂停" tone="default" />
+            <ActionButton actionId="pvz_stop" label="停止" tone="warning" />
+          </ButtonGroup>
+        </Stack>
+      </Card>
+
+      <Card title="游戏窗口（多个匹配时默认用第一个，可切换）">
+        {state.windows.length === 0 ? (
+          <Text>
+            未找到匹配的游戏窗口。启动游戏后点「刷新」，这里会自动列出所有匹配窗口。
+          </Text>
+        ) : (
+          <Stack>
+            {state.windows.map((w) => {
+              const active = state.windowHwnd === w.hwnd
+              return (
+                <Stack key={`win-${w.hwnd}`}>
+                  <Text>
+                    {active ? "✔ 当前使用：" : ""}
+                    {w.title}（句柄 {w.hwnd}）
+                  </Text>
+                  {active ? null : (
+                    <Button onClick={() => selectWindow(w.hwnd)}>
+                      {state.selectingHwnd === w.hwnd ? "切换中…" : "使用此窗口"}
+                    </Button>
+                  )}
+                </Stack>
+              )
+            })}
+          </Stack>
+        )}
+      </Card>
+
+      <Card title="怎么开始">
+        <Steps>
+          <Step index="1" title="打开游戏">
+            启动《植物大战僵尸》。插件会按 window_titles 关键词自动识别游戏窗口
+            （关键词模糊匹配 + PopCap 引擎窗口类兜底）；多个匹配时**默认用第一个**，
+            也可在上方「游戏窗口」卡片里手动切换。标题特殊时把关键词加进
+            pvz/config.json 的 window_titles（保存即生效）。
+          </Step>
+          <Step index="2" title="配置 AI 决策">
+            打开「配置面板」（插件页的面板入口，或浏览器访问 /plugin/pvz_agent/ui/），
+            填写**服务地址 / 模型 / 密钥**并保存，然后重启插件。vision / text 两种模式
+            共用地址与密钥；思考参数按你用的模型在下拉里选（DeepSeek / OpenAI / Claude /
+            Gemini / OpenRouter 都有对应项）。
+          </Step>
+          <Step index="3" title="手动选卡后开始">
+            默认**选卡由你手动操作**（agent_controls_seed_selection=false，选卡不触发 LLM）：
+            在游戏里选好卡进入战斗后，对猫娘说“去玩植物大战僵尸吧”，或点上面的「开始游玩」。
+            （想让猫娘自动选卡，在「配置面板」里把该配置改为 true 并重启。）
+          </Step>
+        </Steps>
+      </Card>
+
+      <Card title="她会怎么做">
+        <Text>
+          开始游玩后，插件每隔几秒截一张游戏画面推给猫娘。猫娘会直接说出她现在的打法
+          （比如“我在第 2 行种一棵豌豆射手”），并自己操作游戏，不会反复问你该怎么做。
+        </Text>
+        <Text>
+          你随时可以在对话里让她调整，比如“这波先攒阳光”“寒冰射手守第二行”，或者
+          说“暂停一下”“停吧”。
+        </Text>
+      </Card>
+
+      <Card title="排障">
+        <Steps>
+          <Step index="1" title="状态一直显示“未找到窗口”">
+            确认游戏已打开；匹配到的窗口会列在上方「游戏窗口」卡片，可手动切换使用哪个。
+            若列表为空，把窗口标题里的关键词加进「配置面板」或 pvz/config.json 的
+            window_titles（保存即生效）。
+          </Step>
+          <Step index="2" title="AI 决策未就绪">
+            说明还没配置 AI 决策：在「配置面板」里填好服务地址 / 模型 / 密钥并保存，重启插件。
+          </Step>
+          <Step index="3" title="纯文本模式提示“内存连接失败”">
+            确认游戏已启动且为受支持的版本；刚启动游戏的话稍等片刻重试，或重启插件。
+          </Step>
+          <Step index="4" title="点「开始游玩」没反应">
+            先确认插件已在运行（列表页启动），再确认游戏窗口与 AI 决策都已就绪。
+          </Step>
+        </Steps>
+      </Card>
+
+      <Card title="其它配置（plugin.toml [pvz_agent]）">
+        <Text>
+          下面这些键都能在「配置面板」里直接改（保存写入 profiles/default.toml，
+          与宿主 GUI 配置界面同一文件）：
+        </Text>
+        <KeyValue
+          items={[
+            { key: "mode", label: "运行模式", value: '"text"=纯文本内存(默认) / "vision"=视觉' },
+            { key: "agent_controls_seed_selection", label: "AgentB 操控选卡", value: "false(默认，手动选卡)" },
+            { key: "tool_call_mode", label: "工具调用", value: '"fc"=原生函数调用 / "regex"=简化正则' },
+            { key: "screenshot_feed_enabled", label: "被动推画面", value: "true（8 秒，画面变了才推）" },
+            { key: "screenshot_nudge_enabled", label: "主动催猫娘行动", value: "true（5 秒）" },
+            { key: "sun_auto_collect", label: "自动收阳光", value: "true" },
+            { key: "window_titles", label: "窗口标题", value: "植物大战僵尸 / Plants vs. Zombies 等关键词" },
+          ]}
+        />
+      </Card>
+
+      <Warning>
+        猫娘的 AI 决策需要能联网调用 AI 服务（在「配置面板」里配置）。没配置时
+        面板会显示“AI 决策未就绪”，点「开始游玩」会提示错误。
+      </Warning>
+
+      <Alert tone="info">
+        **纯文本模式已经可以用了**（mode="text"，当前默认）：不用视觉模型 / OpenCV，一切
+        状态与触发靠读游戏内存（pvz/vendor/pvz_memory）——精确拿到阳光/卡片/植物/僵尸血量/
+        波次，用**纯文本 LLM** 决策，动作走代码注入执行；
+        但**仍照常把游戏截图推给猫娘**供她看画面指挥。
+        特点：LLM 思考期间不冻结游戏、窗口失焦也不暂停、非战斗界面不喂 LLM 只轮询等待。
+        注意：使用受支持的游戏版本体验最佳。
+      </Alert>
+    </Page>
+  )
+}
