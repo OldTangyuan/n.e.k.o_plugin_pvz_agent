@@ -1,4 +1,4 @@
-﻿[project]
+[project]
 name = "pvz_agent"
 version = "0.4.1"
 # 运行时依赖由宿主（N.E.K.O）共享环境提供（openai/pywin32/Pillow），插件不声明以免
