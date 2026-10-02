@@ -25,21 +25,14 @@ from types import SimpleNamespace
 
 import pytest
 
+# 非 Windows 跳过（executor 模块顶部无条件 import ctypes.wintypes）。
+# guard 必须在 pvz_memory import 之前；sys.platform 条件是 Ruff E402 允许的
+# 前置语句（与 test_service.py 同模式）。pvz 导入路径由 tests/conftest.py 设置。
 if sys.platform != "win32":
     pytest.skip(
         "PvZ Agent 插件测试依赖 Windows 运行时（executor 模块 import ctypes.wintypes）",
         allow_module_level=True,
     )
-
-# 让 pvz_memory 可导入：兼容本仓库布局（<root>/pvz）与宿主安装布局
-_HERE = __import__("pathlib").Path(__file__).resolve().parent
-for _candidate in (_HERE.parent, _HERE.parent.parent):
-    _pvz_dir = _candidate / "pvz"
-    if (_pvz_dir / "vendor" / "pvz_memory").is_dir():
-        for _p in (str(_pvz_dir), str(_pvz_dir / "vendor")):
-            if _p not in sys.path:
-                sys.path.insert(0, _p)
-        break
 
 from pvz_memory import executor as pvz_executor  # noqa: E402
 from pvz_memory.executor import PvZExecutor  # noqa: E402
