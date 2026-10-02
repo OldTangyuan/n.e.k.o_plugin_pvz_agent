@@ -686,6 +686,56 @@ class PvZCodeInjector:
         """向 PvZ 进程指定地址写入 32 位整数 (如修改阳光数量)."""
         self._write_bytes(addr, struct.pack('<i', value))
 
+    def write_byte(self, addr: int, value: int) -> None:
+        """向 PvZ 进程指定地址写入单字节 (如卡片 Enable/Active 标志)."""
+        self._write_bytes(addr, bytes([value & 0xFF]))
+
+    def start_card_cooldown(self, card_addr: int, duration_cs: int) -> None:
+        """让指定卡槽卡片进入游戏原生冷却 (等价 pvzclass SeedCard::EnterCoolDown).
+
+        SeedCard 字段语义 (pvzclass PVZ.h, 原版 1.0.0.1051 实证):
+        - 0x24 CoolDown         已冷却时长, 从 0 逐 tick 递增
+        - 0x28 CoolDownInterval 冷却总时长
+        - 0x48 Enable           可点击标志
+        - 0x49 Active           正在冷却标志
+
+        游戏每帧的 SeedCard::Update 只在 Active=1 时递增 CoolDown 并绘制冷却
+        遮罩, CoolDown 超过 Interval 时自动置 Active=0 / Enable=1 并播放就绪
+        闪光。因此 PutPlant 直注后按原生顺序写这四个字段:
+
+            Enable = 0; Interval = duration; CoolDown = 0; Active = 1
+
+        游戏就会自己跑完整个冷却: 冷却条照常显示/倒计时/结束时闪光,
+        与真实鼠标种植完全一致 (PutPlant 本身不触发任何冷却逻辑)。
+
+        Args:
+            card_addr: 卡片对象首地址 (SeedArray+0x28+index*0x50)。
+            duration_cs: 冷却总时长 (厘秒)。
+        """
+        duration_cs = max(1, int(duration_cs))
+        self.write_byte(card_addr + 0x48, 0)            # Enable = false (不可点击)
+        self.write_int(card_addr + 0x28, duration_cs)   # CoolDownInterval = 总时长
+        self.write_int(card_addr + 0x24, 0)             # CoolDown = 0 (从零开始计)
+        self.write_byte(card_addr + 0x49, 1)            # Active = true (正在冷却)
+        logger.info("[注入] 卡片 0x%X 进入冷却 %s 厘秒 (Enable=0, Active=1)",
+                    card_addr, duration_cs)
+
+    def clear_seed_card(self, card_addr: int) -> None:
+        """传送带关卡牌消耗：把卡槽种子类型写 -1（空槽），等价游戏原生"用后消失".
+
+        游戏原生的传送带消耗流程：卡被用掉 → 槽位 SeedType 变 -1（空槽）→
+        传送带按自身节奏向空槽补送新坚果（0.4.4 实测 1-5 存活内存里游戏自己
+        消耗过的槽就是 -1）。PutPlant 只创建植物不消耗卡牌，直注成功后调用
+        本方法模拟同一效果，否则用过的坚果永久占槽。
+
+        sc_type = 0x34（与 offsets.sc_type 一致）。
+
+        Args:
+            card_addr: 卡片对象首地址 (SeedArray+0x28+index*0x50)。
+        """
+        self.write_int(card_addr + 0x34, -1)
+        logger.info("[注入] 卡片 0x%X 已清空 (type=-1，等待传送带补卡)", card_addr)
+
     # ------------------------------------------------------------------ #
     #  注入核心 — shellcode 执行
     # ------------------------------------------------------------------ #

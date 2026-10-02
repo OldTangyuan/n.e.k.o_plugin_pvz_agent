@@ -121,7 +121,7 @@ PLANT_NAMES: dict[int, str] = {
     36: "大蒜", 37: "叶子保护伞", 38: "金盏花", 39: "西瓜投手",
     40: "机枪射手", 41: "双子向日葵", 42: "忧郁菇", 43: "香蒲",
     44: "冰西瓜投手", 45: "吸金磁", 46: "地刺王", 47: "玉米加农炮",
-    48: "模仿者",
+    48: "模仿者", 49: "爆炸坚果",
 }
 
 # 植物类型 → 阳光消耗
@@ -132,7 +132,7 @@ PLANT_SUN_COST: dict[int, int] = {
     23: 125, 24: 0, 25: 25, 26: 125, 27: 100, 28: 125, 29: 125,
     30: 125, 31: 100, 32: 100, 33: 25, 34: 100, 35: 75, 36: 50,
     37: 100, 38: 50, 39: 300, 40: 250, 41: 150, 42: 150, 43: 225,
-    44: 200, 45: 50, 46: 125, 47: 500, 48: 0,
+    44: 200, 45: 50, 46: 125, 47: 500, 48: 0, 49: 0,
 }
 
 # 升级植物 → 基础植物 映射
@@ -319,14 +319,15 @@ class PvZOffsets:
     seed_card_offset: int = 0x28    # 第 0 张卡片起始偏移
     seed_card_size: int = 0x50      # 每张卡片大小 (来自 pvztoolkit slot_seed_struct_size)
     sc_type: int = 0x34             # 卡片内: 种子类型
-    sc_cd: int = 0x24               # 卡片内: 冷却
-    sc_initial_cd: int = 0x28       # 卡片内: 初始冷却
+    sc_cd: int = 0x24               # 卡片内: 已冷却时长（从 0 逐 tick 递增，到达 sc_initial_cd 即冷却结束）
+    sc_initial_cd: int = 0x28       # 卡片内: 冷却总时长
     sc_imitator_type: int = 0x38    # 卡片内: 模仿者类型
     sc_x: int = 0x08                # 卡片内: 横坐标
     sc_y: int = 0x0c                # 卡片内: 纵坐标
     sc_width: int = 0x10            # 卡片内: 宽度
     sc_height: int = 0x14           # 卡片内: 高度
-    sc_usable: int = 0x48           # 卡片内: 是否可用
+    sc_usable: int = 0x48           # 卡片内: 是否可用（可点击）
+    sc_active: int = 0x49           # 卡片内: 是否正在冷却（pvzclass SeedCard.Active）
 
     # 收集物字段
     i_abscissa: int = 0x24          # float
@@ -344,6 +345,7 @@ class PvZOffsets:
 
     # 割草机字段
     lm_dead: int = 0x30
+    lm_row: int = 0x14               # 割草机内: 所在行（0.4.2 实测：教学关=草皮行 row1~3，普通关=row 0..N-1，均与数组下标不同）
 
     # 子弹字段
     pr_type: int = 0x5c

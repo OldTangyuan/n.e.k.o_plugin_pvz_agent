@@ -72,7 +72,7 @@
     <div class="row"><label>运行模式 (mode)</label><select id="mode"></select>
       <div class="help">text=读内存+纯文本 LLM（推荐，需管理员权限）；vision=OpenCV 截图+视觉模型</div></div>
     <div class="row"><label>种植模式 (planting_mode)</label><select id="plantingMode"></select>
-      <div class="help">模拟点击=游戏自管阳光/冷却（0.3.0 手感）；直注=插件手动修补副作用</div></div>
+      <div class="help">直注（默认）=插件按游戏原生语义补齐；模拟点击=游戏自管阳光/冷却</div></div>
     <div class="row"><label>工具调用模式 (tool_call_mode)</label><select id="toolCallMode"></select>
       <div class="help">模型输出动作的解析方式</div></div>
     <div class="grid2">
@@ -147,7 +147,7 @@ const diag = $("diag"), alertBox = $("alertBox");
 
 const OPTS = {
   mode: [["text","纯文本内存方案（推荐）：读内存 + 纯文本 LLM 决策"],["vision","OpenCV 视觉方案：截图识别 + 视觉模型决策"]],
-  plantingMode: [["mouseclick","模拟鼠标点击（推荐，游戏自管阳光/冷却）"],["putplant","PutPlant 直接注入（副作用多）"]],
+  plantingMode: [["putplant","PutPlant 直接注入（默认，推荐）"],["mouseclick","模拟鼠标点击（游戏自管阳光/冷却）"]],
   toolCallMode: [["fc","原生函数调用（function calling）"],["regex","简化正则提取 <tool_call>"]],
   yesno: [["true","开启"],["false","关闭"]],
   cardPositionMode: [["opencv","OpenCV 实时扫描（失败回退固定坐标）"],["fixed","固定坐标"]],

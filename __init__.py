@@ -65,7 +65,7 @@ def _nonempty_str(v: Any) -> bool:
 # ---------------------------------------------------------------------- #
 _CONFIG_ENUM_CHOICES: dict[str, tuple[str, ...]] = {
     "mode": ("text", "vision"),
-    "planting_mode": ("mouseclick", "putplant"),
+    "planting_mode": ("putplant", "mouseclick"),
     "tool_call_mode": ("regex", "fc"),
     "card_position_mode": ("opencv", "fixed"),
 }
@@ -704,7 +704,7 @@ class PVZAgentPlugin(NekoPluginBase):
             "type": "object",
             "properties": {
                 "mode": {"type": "string", "enum": ["text", "vision"]},
-                "planting_mode": {"type": "string", "enum": ["mouseclick", "putplant"]},
+                "planting_mode": {"type": "string", "enum": ["putplant", "mouseclick"]},
                 "tool_call_mode": {"type": "string", "enum": ["regex", "fc"]},
                 "card_position_mode": {"type": "string", "enum": ["opencv", "fixed"]},
                 "auto_start": {"type": "boolean"},

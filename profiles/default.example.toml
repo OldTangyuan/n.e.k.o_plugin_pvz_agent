@@ -19,7 +19,7 @@ text_api_key = ""
 
 # ── 运行方式 ──
 # mode = "text"              # "text"=纯文本内存(推荐) / "vision"=OpenCV 视觉
-# planting_mode = "mouseclick"  # "mouseclick"=模拟鼠标点击(推荐) / "putplant"=PutPlant 直注
+# planting_mode = "putplant"  # "putplant"=PutPlant 直注(默认) / "mouseclick"=模拟鼠标点击
 # tool_call_mode = "fc"      # "fc"=原生函数调用 / "regex"=简化正则
 # auto_start = false
 # agent_controls_seed_selection = false

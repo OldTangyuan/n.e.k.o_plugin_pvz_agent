@@ -51,16 +51,21 @@ def level_is_conveyor(state: Any) -> bool:
     """传送带关单次观测判定：卡槽全空 且 game_mode 非冒险/未知。
 
     - game_mode 0 = 冒险模式（教程关/普通冒险关，绝不能按传送带处理——4.0 教训）；
+    - **例外：1-5 坚果保龄球**——冒险模式内的传送带关（0.4.3 实测：mode=0、
+      Board+0x5550 读 5、无阳光机制、卡槽被传送带喂满坚果）。不看卡槽直接
+      判传送带，否则普通关路径会给用过的坚果开 30s 冷却、占着卡槽不消失；
     - game_mode -1 = 读取失败（保守按普通关处理）；
     - 其余模式 + 卡槽全空 = 传送带关。
-    卡槽非空恒 False。粘性（首战斗观测决定整关）由调用方维护——传送带关
-    收取后卡槽也有卡，单次观测会误判。
+    卡槽非空恒 False（上面的 1-5 例外除外）。粘性（首战斗观测决定整关）由
+    调用方维护——传送带关收取后卡槽也有卡，单次观测会误判。
     """
     try:
+        mode = _as_int(getattr(state, "game_mode", -1))
+        if mode == 0 and _as_int(getattr(state, "adventure_level", -1)) == 5:
+            return True
         for s in (getattr(state, "seeds", []) or []):
             if _as_int(getattr(s, "plant_type", -1)) >= 0:
                 return False
-        mode = _as_int(getattr(state, "game_mode", -1))
     except Exception:
         return False
     return mode not in (0, -1)
@@ -77,8 +82,8 @@ class SeedInfo:
     plant_type: int     # 植物类型 ID
     name: str           # 植物名称
     sun_cost: int       # 阳光消耗
-    cd: int             # 当前冷却 (厘秒, 0=可用)
-    initial_cd: int     # 初始冷却 (厘秒)
+    cd: int             # 已冷却时长 (厘秒, 游戏内从 0 逐帧递增到 initial_cd)
+    initial_cd: int     # 冷却总时长 (厘秒)
     is_usable: bool     # 是否可用
     imitator_type: int  # 模仿者实际类型 (-1=非模仿者)
     x: int = 0          # 卡片横坐标
@@ -91,11 +96,25 @@ class SeedInfo:
         return self.is_usable and self.cd == 0
 
     @property
+    def cd_remaining(self) -> int:
+        """剩余冷却（厘秒）。
+
+        游戏内存 0x24 是"已冷却时长"（pvzclass SeedCard.CoolDown：从 0 逐帧
+        递增，超过 0x28 总时长时游戏解除冷却并回写 0），因此剩余 =
+        总时长 - 已冷却。0x28 读到脏值（< 已冷却）时退回旧口径原样显示。
+        """
+        if self.cd <= 0:
+            return 0
+        if self.initial_cd >= self.cd:
+            return self.initial_cd - self.cd
+        return self.cd
+
+    @property
     def cd_progress(self) -> float:
-        """冷却进度 0.0~1.0, 1.0=就绪."""
+        """冷却进度 0.0~1.0（已冷却时长占比），1.0=就绪."""
         if self.initial_cd <= 0:
             return 1.0
-        return max(0.0, min(1.0, 1.0 - self.cd / self.initial_cd))
+        return max(0.0, min(1.0, self.cd / self.initial_cd))
 
 
 @dataclass
@@ -211,6 +230,7 @@ class GameState:
     # 基础
     game_ui: int = 0
     game_mode: int = 0
+    adventure_level: int = -1   # 冒险关卡序号（Board+0x5550，1-1=1 … 5-10=50；非冒险/读失败=-1）
     sun: int = 0
     scene: int = -1
     scene_name: str = "未知"
@@ -303,18 +323,25 @@ class PvZStateReader:
         return verdict
 
     def _dump_bank_if_changed(self, state: Any, verdict: bool) -> None:
-        """卡槽组签名变化时转储 bank头（换关/卡槽变动各记一次，尽力而为）。"""
+        """关卡/卡槽变化时记一行判定依据（bank头作传送带标定数据，尽力而为）。
+
+        签名只取 game_mode + 卡槽类型——bank头里含逐帧变化的内部计数
+        （实测第 3 个 int 在 0/1/10 间跳动），按全头做 key 会每秒刷屏；
+        0.4.2 起只在真正换关/卡槽变动时记一行，并把 game_mode=0 的含义
+        写进日志（0=冒险/普通关，是"非传送带"的证据而非判定结果）。
+        """
         try:
-            bank = self._read_bank_header()
+            mode = _as_int(getattr(state, "game_mode", -1))
             bar = tuple(_as_int(getattr(s, "plant_type", -1))
                         for s in (getattr(state, "seeds", []) or [])[:10])
-            key = (tuple(bank or []), bar)
+            key = (mode, bar)
             if key != getattr(self, "_last_bank_key", None):
                 self._last_bank_key = key
+                bank = self._read_bank_header()
                 logger.info(
-                    "[PvZ] 传送带判定: game_mode=%s 卡槽=%s bank头=%s → %s",
-                    _as_int(getattr(state, "game_mode", -1)), list(bar), bank,
-                    "传送带关（不计阳光）" if verdict else "普通关（PutPlant 直接注入，计阳光）",
+                    "[PvZ] 传送带判定: game_mode=%s（0=冒险/普通关，非传送带）卡槽=%s bank头=%s → %s",
+                    mode, list(bar), bank,
+                    "传送带关（不计阳光，卡牌用后由游戏原生消耗）" if verdict else "普通关（非传送带，计阳光）",
                 )
         except Exception:
             pass
@@ -357,6 +384,15 @@ class PvZStateReader:
         # 基础信息
         state.game_ui = self._mem.get_game_ui()
         state.game_mode = self._mem.get_game_mode()
+        # 冒险关卡序号（0.4.3）：供 level_is_conveyor 识别冒险模式内的
+        # 传送带关（1-5 坚果保龄球，实测 Board+0x5550=5）。越界视为读失败。
+        try:
+            adv = self._mem.read_int(
+                self._mem.main_object + self._mem.offsets.adventure_level
+            )
+            state.adventure_level = adv if 0 <= adv <= 100 else -1
+        except (PvZMemoryError, OSError, ValueError):
+            state.adventure_level = -1
 
         if not self._mem.main_object:
             return state
@@ -425,6 +461,13 @@ class PvZStateReader:
             self.conveyor_verdict(state)
         except Exception as exc:
             logger.debug("[PvZReader] 传送带判定异常: %s", exc)
+
+        # 草皮行推导（教学关特殊布局）：每轮无条件重算盖章，与传送带判定
+        # 同理——多个读取入口共享同一 state 结论，纯推导不缓存不分叉。
+        try:
+            self._stamp_plantable_rows(state)
+        except Exception as exc:
+            logger.debug("[PvZReader] 草皮行推导异常: %s", exc)
 
         return state
 
@@ -723,7 +766,16 @@ class PvZStateReader:
     # ------------------------------------------------------------------ #
 
     def _read_lawn_mowers(self) -> list[LawnMowerInfo]:
-        """读取割草机状态."""
+        """读取割草机状态.
+
+        行号读割草机对象内的真实行（lm_row=0x14）——0.4.2 实测教学关只在
+        草皮行配割草机且行号为全草坪坐标（三行草皮关=[1,2,3]），普通关
+        [0..N-1]，两者都与数组下标不同，旧实现按 row=i 猜在教学关失准。
+        已发射的割草机保留在列表（is_alive=False，对象内的行号依然有效），
+        草皮行推导在关末依旧稳定；展示层自行过滤 alive。
+        校验：行值必须全在 0..9 且按下标严格递增（数组按行排列），不满足
+        视为该版本对象布局不同，退回按数组下标当行号（普通关不受影响）。
+        """
         off = self._mem.offsets
         mo = self._mem.main_object
 
@@ -733,22 +785,42 @@ class PvZStateReader:
 
         count_max = self._mem.read_int(mo + off.lawn_mower_count_max)
 
-        result: list[LawnMowerInfo] = []
+        rows: list[int] = []
+        alive_flags: list[bool] = []
         for i in range(min(count_max, 12)):
             addr = lm_array + i * off.lawn_mower_struct_size
 
             try:
                 is_dead = self._mem.read_bool(addr + off.lm_dead)
+                row_raw = self._mem.read_int(addr + off.lm_row)
             except PvZMemoryError:
                 break
 
-            result.append(LawnMowerInfo(
-                index=i,
-                row=i,  # 割草机按行排列
-                is_alive=not is_dead,
-            ))
+            rows.append(row_raw if 0 <= row_raw <= 9 else i)
+            alive_flags.append(not is_dead)
 
-        return [lm for lm in result if lm.is_alive]
+        # 行值序列非法（越界/非递增）→ 该版本 0x14 不是行字段，退回下标
+        if any(rows[i] >= rows[i + 1] for i in range(len(rows) - 1)):
+            rows = list(range(len(rows)))
+
+        return [
+            LawnMowerInfo(index=i, row=rows[i], is_alive=alive_flags[i])
+            for i in range(len(rows))
+        ]
+
+    @staticmethod
+    def _stamp_plantable_rows(state: Any) -> None:
+        """由割草机行推导草皮行并盖章 ``state._plantable_rows``（0.4.2）.
+
+        普通关/泳池关每行一台割草机，行集合连续且从 0 起（[0..N-1]）→
+        无特殊布局，盖 None；教学关只在草皮行配割草机（实测 [1,2,3] /
+        单行 [2]），推导出非 0 起始的行集合 → 盖行列表，供 executor 把
+        种到无草皮行的请求重定向到最近草皮行、供【棋盘】行明示草皮行。
+        """
+        mowers = getattr(state, "lawn_mowers", []) or []
+        rows = sorted({lm.row for lm in mowers})
+        plantable = rows if rows and rows != list(range(len(rows))) else None
+        state._plantable_rows = plantable
 
     # ================================================================== #
     #  格式化输出 — 生成 LLM 可理解的结构化文本
@@ -850,8 +922,9 @@ class PvZStateReader:
 
         # ---- 种子卡片 ----
         # 状态判定优先级: 冷却中 > 就绪 > 阳光不足 > 锁定/禁用
-        # 关键: 只要 cd>0 就显示冷却剩余秒数，不因 is_usable 不可靠而吞掉冷却信息。
-        # （内存偏移 0x48 的 is_usable 语义模糊，可能把冷却中的卡也标成不可用。）
+        # 关键: cd>0 即在冷却（0x24 是"已冷却时长"，从 0 逐帧递增到 0x28 总
+        # 时长，超过即解除），显示真实剩余秒数（总时长-已冷却），不因
+        # is_usable 不可靠而吞掉冷却信息。
         lines.append("📋 卡片:")
         # 过滤无效占位卡（plant_type<0）：它们不是真卡（传送带空槽/未初始化），
         # 若按原样显示成 "未知(-1) (0☀) ✅"，模型会误以为有可用卡去 place_plant。
@@ -859,8 +932,8 @@ class PvZStateReader:
         if valid_seeds:
             for s in valid_seeds:
                 if s.cd > 0:
-                    # 冷却中: 显示剩余秒数 (cd 是厘秒)
-                    status = f"⏳{s.cd / 100:.1f}s"
+                    # 冷却中: 显示剩余秒数（0x28 总时长 - 0x24 已冷却时长）
+                    status = f"⏳{s.cd_remaining / 100:.1f}s"
                 elif belt or state.sun >= s.sun_cost:
                     # 传送带关不计阳光——cd==0 即可种
                     status = "✅"

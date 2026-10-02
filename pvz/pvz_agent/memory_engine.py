@@ -74,21 +74,21 @@ class MemoryGameEngine:
         self._prev_in_select = False   # 上一轮是否处于选卡界面（用于检测新选卡会话）
         # 是否允许 AgentB 操控选卡界面（默认关：选卡场景不触发 LLM，由玩家手动选卡）。
         self._allow_seed_selection = False
-        # 种植模式："mouseclick"=注入 MouseClick 点卡片+点格子（默认，0.3.0
-        # 主路线，游戏自管阳光/冷却/占用）；"putplant"=PutPlant 直接注入
-        # （绕过 UI，需手动修补副作用；非原版游戏自动退化到此）。
-        self._planting_mode = "mouseclick"
+        # 种植模式："putplant"=PutPlant 直接注入（默认，0.4.6 起为主路线：
+        # UI 语义由插件按游戏原生规则补齐——扣阳光/原生冷却/传送带卡牌消耗）；
+        # "mouseclick"=注入 MouseClick 点卡片+点格子（游戏自管阳光/冷却/占用）。
+        self._planting_mode = "putplant"
         # 把 pvz_memory 内部日志（注入动作/传送带收取/读取诊断）路由进插件文件日志，
         # 否则 collect_belt、MouseClick、PutPlant 的细节在排障时完全不可见。
         self._wire_pvz_memory_logging()
 
     def set_planting_mode(self, mode: str) -> None:
-        """设置种植模式（"mouseclick" / "putplant"），非法值回退 mouseclick。
+        """设置种植模式（"putplant" / "mouseclick"），非法值回退 putplant。
 
         configure 时调用；若执行器已存在（热更新配置）则同步应用到执行器。
         """
-        _m = str(mode or "mouseclick").strip().lower()
-        self._planting_mode = _m if _m in ("mouseclick", "putplant") else "mouseclick"
+        _m = str(mode or "putplant").strip().lower()
+        self._planting_mode = _m if _m in ("mouseclick", "putplant") else "putplant"
         if self._executor is not None:
             self._executor._planting_mode = self._planting_mode
 
@@ -207,6 +207,22 @@ class MemoryGameEngine:
             raise RuntimeError(f"内存状态读取异常: {state.last_error}")
         text = self._reader.format_state(state)
         rows, cols = self.grid_dims(fallback=fallback_grid)
+        # 教学关特殊布局（0.4.2 实测）：割草机数=草皮行数（三行草皮关=3），
+        # 但行坐标仍是全草坪 0~4——直接把 3 当行数会让模型把草皮行当
+        # row 0~2，全部种到草皮上方一行，草皮末行的僵尸无人防守。此时
+        # 行数回退全草坪值，并把草皮行明示出来（executor 同时会把种到
+        # 非草皮行的请求重定向到最近草皮行兜底）。
+        plantable = getattr(state, "_plantable_rows", None)
+        if plantable and cols:
+            fb_rows = (fallback_grid or (0, 0))[0]
+            total_rows = fb_rows if fb_rows and fb_rows > max(plantable) else 5
+            note = "、".join(str(r) for r in plantable)
+            grid_line = (
+                f"【棋盘】{total_rows} 行 x {cols} 列（row 0~{total_rows - 1} / "
+                f"col 0~{cols - 1}，0-based；本关是教学关：只有 row {note} "
+                f"有草皮可种，僵尸也只在草皮行出现，其他行请勿种植）"
+            )
+            return f"{grid_line}\n{text}"
         if rows and cols:
             grid_line = f"【棋盘】{rows} 行 x {cols} 列（row 0~{rows-1} / col 0~{cols-1}，0-based）"
             return f"{grid_line}\n{text}"
