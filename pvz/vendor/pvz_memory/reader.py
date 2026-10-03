@@ -62,19 +62,23 @@ def _as_int(value: Any, default: int = -1) -> int:
 
 # 传送带关（卡栏由传送带自动喂卡、用后消失）的 GameMode 白名单
 BELT_GAME_MODES = frozenset({
-    17,   # 坚果保龄球（小游戏版，无阳光）GAMEMODE_CHALLENGE_WALLNUT_BOWLING
-    33,   # 坚果保龄球2（小游戏版，无阳光）GAMEMODE_CHALLENGE_WALLNUT_BOWLING_2
-    35,   # 僵王博士的复仇（小游戏版，有阳光）GAMEMODE_CHALLENGE_FINAL_BOSS
+    17,   # 坚果保龄球（小游戏版）GAMEMODE_CHALLENGE_WALLNUT_BOWLING
+    33,   # 坚果保龄球2（小游戏版）GAMEMODE_CHALLENGE_WALLNUT_BOWLING_2
+    35,   # 僵王博士的复仇（小游戏版）GAMEMODE_CHALLENGE_FINAL_BOSS
 })
 # 冒险模式里的传送带关（game_mode=0 时按关卡号识别）
 BELT_ADVENTURE_LEVELS = frozenset({
-    5,    # 1-5 坚果保龄球（无阳光）——实机验证
-    35,   # 4-5 坚果保龄球2（无阳光）——按公式推算
-    50,   # 5-10 僵王博士（有阳光）——按公式推算
+    5,    # 1-5 坚果保龄球——实机验证
+    35,   # 4-5 坚果保龄球2——按公式推算
+    50,   # 5-10 僵王博士——按公式推算
 })
-# 其中"有阳光"的传送带关：天降阳光 + 种卡要阳光（卷心菜 100 等）
-BELT_WITH_SUN_GAME_MODES = frozenset({35})
-BELT_WITH_SUN_ADVENTURE_LEVELS = frozenset({50})
+
+# 行为语义（0.4.9 用户决策，统一单档）：所有传送带关**免阳光、无冷却、
+# 无任何阳光/冷却提示**。僵王关实测虽有阳光经济（天降阳光、卷心菜 100☀），
+# 但种植走 PutPlant 直注（游戏函数不扣阳光），插件统一按 0 费用注入、
+# 不开冷却、文本不提阳光——防止模型把"阳光 0"当成种不了而干等。
+# 0.4.8 曾给僵王类保留"有阳光"档（真实扣费+硬拦），实机阳光=0 时把模型
+# 卡死（"需要 100 阳光，当前只有 0"），已按统一语义回退。
 
 
 def level_is_conveyor(state: Any) -> bool:
@@ -87,30 +91,13 @@ def level_is_conveyor(state: Any) -> bool:
     为什么不再用"卡槽全空"启发式：传送带关开局卡栏很快被喂满，瞬态信号
     只在头几十秒成立，之后恒误判普通关（僵王关全程判错的根因）；而生存
     模式选卡前卡栏也全空，反向误判。白名单对原版/中文版全量关卡权威。
+    传送带关行为语义见上方常量注释（0.4.9 统一免阳光/无冷却）。
     """
     try:
         mode = _as_int(getattr(state, "game_mode", -1))
         if mode in BELT_GAME_MODES:
             return True
         if mode == 0 and _as_int(getattr(state, "adventure_level", -1)) in BELT_ADVENTURE_LEVELS:
-            return True
-    except Exception:
-        return False
-    return False
-
-
-def belt_uses_sun(state: Any) -> bool:
-    """传送带关是否保留阳光机制（僵王类：天降阳光 + 种卡要阳光）.
-
-    坚果保龄球类没有阳光经济（判定"不计阳光"）；僵王博士的复仇（小游戏
-    mode=35 / 冒险 5-10）天降阳光、卷心菜 100☀ 等照常扣费——这两类传送带
-    的种植/文本行为必须分开。
-    """
-    try:
-        mode = _as_int(getattr(state, "game_mode", -1))
-        if mode in BELT_WITH_SUN_GAME_MODES:
-            return True
-        if mode == 0 and _as_int(getattr(state, "adventure_level", -1)) in BELT_WITH_SUN_ADVENTURE_LEVELS:
             return True
     except Exception:
         return False
@@ -349,8 +336,9 @@ class PvZStateReader:
     def conveyor_verdict(self, state: Any) -> bool:
         """传送带判定：**逐轮纯推导**（level_is_conveyor），无任何实例级缓存。
 
-        结果盖章 state._is_conveyor 与 state._belt_uses_sun 供 executor /
-        format_state 共享。为什么不用粘性缓存：service 有多个读取入口
+        结果盖章 state._is_conveyor 供 executor 共享。传送带关行为语义
+        （0.4.9 统一免阳光/无冷却/无提示）见白名单常量注释。
+        为什么不用粘性缓存：service 有多个读取入口
         （文本循环、pvz_scan、逐动作 execute 重读）且运行时进程长期存活，
         实例缓存在跨关/重启混载时会分叉——实测 20:54 文本循环判普通关、
         execute 却按陈旧缓存当传送带种（无阳光无冷却）。纯推导对同一内存
@@ -359,7 +347,6 @@ class PvZStateReader:
         verdict = level_is_conveyor(state)
         try:
             state._is_conveyor = verdict
-            state._belt_uses_sun = verdict and belt_uses_sun(state)
         except Exception:
             pass
         self._dump_bank_if_changed(state, verdict)
@@ -381,12 +368,8 @@ class PvZStateReader:
             if key != getattr(self, "_last_bank_key", None):
                 self._last_bank_key = key
                 bank = self._read_bank_header()
-                if verdict:
-                    kind = ("传送带关·有阳光（僵王类，卡栏自动喂卡+种卡扣阳光）"
-                            if belt_uses_sun(state)
-                            else "传送带关（不计阳光，卡牌用后由游戏原生消耗）")
-                else:
-                    kind = "普通关（非传送带，计阳光）"
+                kind = ("传送带关（不计阳光/无冷却，卡牌用后由游戏原生消耗）"
+                        if verdict else "普通关（非传送带，计阳光）")
                 logger.info(
                     "[PvZ] 传送带判定: game_mode=%s 冒险关卡号=%s 卡槽=%s bank头=%s → %s",
                     mode, getattr(state, "adventure_level", "?"), list(bar), bank, kind,
@@ -940,18 +923,12 @@ class PvZStateReader:
         # 后文（关卡类型/阳光/卡片状态/空卡栏提示）读到同一轮的一致结论，
         # 不依赖调用方是否已先盖章（read_state 正常会盖，这里双保险）。
         belt = self.conveyor_verdict(state)
-        belt_sun = bool(getattr(state, "_belt_uses_sun", False))
         if belt:
-            if belt_sun:
-                # 僵王类传送带：卡栏自动喂卡 + 阳光正常计费（天降阳光）
-                lines.append(
-                    "🏷 关卡类型: 传送带关·有阳光——卡牌由传送带自动喂入，用后消失并自动补新卡；"
-                    "**阳光正常计费**（种卡要阳光，阳光不足就本轮 wait 等天降阳光）"
-                )
-                lines.append(f"☀ 阳光: {state.sun}（种卡照常扣阳光）")
-            else:
-                lines.append("🏷 关卡类型: 传送带关——植物由传送带供给，**不计阳光**（阳光数字无视）")
-                lines.append("☀ 阳光: 不适用（传送带关没有阳光机制，卡可用就直接种，绝不要 wait）")
+            # 0.4.9 起传送带关**统一免阳光**（用户决策）：僵王关实测虽有
+            # 阳光经济，但种植走 PutPlant 直注，插件不扣阳光也不显示任何
+            # 阳光/冷却提示——防止模型把"阳光 0"当成种不了而干等。
+            lines.append("🏷 关卡类型: 传送带关——植物由传送带供给，**不计阳光、无冷却**（卡可用就直接种）")
+            lines.append("☀ 阳光: 不适用（传送带关没有阳光机制，绝不要因阳光数字 wait）")
         else:
             lines.append(f"☀ 阳光: {state.sun}")
         # 游戏时钟（厘秒 → mm:ss），帮助模型判断节奏
@@ -990,11 +967,16 @@ class PvZStateReader:
         valid_seeds = [s for s in state.seeds if s.plant_type >= 0]
         if valid_seeds:
             for s in valid_seeds:
+                if belt:
+                    # 传送带关统一语义（0.4.9）：有卡即可种——不显示冷却
+                    # （喂卡节奏由传送带管理）、不显示☀费用/☀不足（免阳光），
+                    # 防止模型误判"阳光不足/冷却中不能种"而干等。
+                    lines.append(f"  [{s.index}] {s.name} ✅")
+                    continue
                 if s.cd > 0:
                     # 冷却中: 显示剩余秒数（0x28 总时长 - 0x24 已冷却时长）
                     status = f"⏳{s.cd_remaining / 100:.1f}s"
-                elif (belt and not belt_sun) or state.sun >= s.sun_cost:
-                    # 无阳光传送带不计阳光——cd==0 即可种；其余按阳光判定
+                elif state.sun >= s.sun_cost:
                     status = "✅"
                 elif s.sun_cost > 0:
                     status = "☀不足"
@@ -1010,15 +992,12 @@ class PvZStateReader:
                 # 僵王博士的复仇实测一致），没有"待收取队列"。collect_belt 的
                 # 扫描点与卡栏重叠，点击只会误拾栏内卡——executor 已对全部
                 # 传送带关禁用，文本也不再引导模型调用（0.4.7 实证它会照旧反复调）。
-                extra = (
-                    "；天降阳光照常等" if belt_sun else ""
-                )
                 lines.append(
                     "  (空——传送带会自动补卡，无需收取)"
                 )
                 lines.append(
                     "  👉 传送带关：空槽由传送带自动补卡（collect_belt 已禁用且不必要）——"
-                    f"先种卡栏已有的卡；全部空槽时本轮 wait 等待补卡后重读{extra}"
+                    "先种卡栏已有的卡；全部空槽时本轮 wait 等待补卡后重读"
                 )
             else:
                 lines.append(

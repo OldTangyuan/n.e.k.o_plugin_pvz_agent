@@ -16,9 +16,9 @@
 旧"卡槽全空"瞬态启发式删除：传送带开局几十秒卡栏就被喂满，僵王关全程
 被误判普通关的根因。
 
-传送带分两档行为：
-- 无阳光（坚果保龄球类）：免阳光、种后消耗卡槽；
-- 有阳光（僵王类）：天降阳光 + 种卡照常扣费 + 卡牌消耗。
+传送带行为统一语义（0.4.9 用户决策）：**免阳光、无冷却、零提示**——
+僵王关实测虽有阳光经济，但种植走 PutPlant 直注不扣费，任何"阳光不足/
+冷却中"提示都会误导模型干等；普通关闸门（冷却+阳光硬拦）保持不变。
 
 只测纯逻辑，不依赖真实游戏进程；非 Windows 跳过。
 """
@@ -44,12 +44,7 @@ from pvz_memory import executor as pvz_executor  # noqa: E402
 from pvz_memory.executor import PvZExecutor  # noqa: E402
 from pvz_memory.injector import PvZCodeInjector  # noqa: E402
 from pvz_memory.offsets import PLANT_NAMES, PLANT_SUN_COST, PvZOffsets  # noqa: E402
-from pvz_memory.reader import (  # noqa: E402
-    GameState,
-    SeedInfo,
-    belt_uses_sun,
-    level_is_conveyor,
-)
+from pvz_memory.reader import GameState, SeedInfo, level_is_conveyor  # noqa: E402
 
 
 def _seed(plant_type: int = 3) -> SeedInfo:
@@ -101,26 +96,16 @@ def test_boss_minigame_is_conveyor() -> None:
 
 
 def test_bowling_minigame_modes_are_conveyor() -> None:
-    """小游戏版坚果保龄球 1/2（GameMode 17/33）判传送带，且无阳光。"""
+    """小游戏版坚果保龄球 1/2（GameMode 17/33）判传送带。"""
     for mode in (17, 33):
         state = SimpleNamespace(game_mode=mode, seeds=[_seed(3)])
         assert level_is_conveyor(state) is True
-        assert belt_uses_sun(state) is False
-
-
-def test_boss_belt_uses_sun() -> None:
-    """僵王类传送带保留阳光机制（天降阳光 + 种卡扣阳光）。"""
-    assert belt_uses_sun(SimpleNamespace(game_mode=35, seeds=[])) is True
-    assert belt_uses_sun(SimpleNamespace(game_mode=0, adventure_level=50, seeds=[])) is True
-    assert belt_uses_sun(SimpleNamespace(game_mode=0, adventure_level=5, seeds=[])) is False
-    assert belt_uses_sun(SimpleNamespace(game_mode=17, seeds=[])) is False
 
 
 def test_adventure_final_boss_5_10_is_conveyor() -> None:
-    """冒险 5-10（最终 boss，adventure_level=50）也是传送带关（有阳光）。"""
+    """冒险 5-10（最终 boss，adventure_level=50）也是传送带关。"""
     state = SimpleNamespace(game_mode=0, adventure_level=50, seeds=[_seed(33)])
     assert level_is_conveyor(state) is True
-    assert belt_uses_sun(state) is True
 
 
 def test_non_belt_modes_stay_normal_even_with_empty_bar() -> None:
@@ -279,11 +264,14 @@ def test_normal_level_putplant_unchanged(monkeypatch) -> None:
     ex._injector.clear_seed_card.assert_not_called()
 
 
-def test_boss_belt_putplant_charges_sun_and_consumes(monkeypatch) -> None:
-    """僵王类传送带（有阳光）：真实费用注入 + 手动扣阳光 + 卡槽消耗 + 不开冷却。"""
+def test_boss_belt_plants_free_even_with_zero_sun(monkeypatch) -> None:
+    """僵王类传送带（mode=35）统一免阳光：阳光=0 也放行，0 费用注入+消耗卡槽。
+
+    0.4.8 回归教训：给僵王类保留"有阳光"档时，阳光=0 被硬拦
+    （"需要 100 阳光，当前只有 0"），模型卡死——0.4.9 起统一免阳光。
+    """
     ex = _bare_executor(planting_mode="putplant", supports_mouse=True)
-    monkeypatch.setattr(pvz_executor.PvZExecutor, "_conveyor_verdict",
-                        lambda self, s: True)   # 盖章由该实现负责；测试手工补 stamp
+    monkeypatch.setattr(pvz_executor.PvZExecutor, "_conveyor_verdict", lambda self, s: True)
     monkeypatch.setattr(pvz_executor.PvZExecutor, "_cell_occupied", lambda self, r, c: True)
     monkeypatch.setattr(pvz_executor.time, "sleep", lambda s: None)
     ex._mem.read_int.return_value = -1
@@ -291,37 +279,44 @@ def test_boss_belt_putplant_charges_sun_and_consumes(monkeypatch) -> None:
     state = SimpleNamespace(
         seeds=[SeedInfo(index=0, plant_type=32, name="卷心菜投手", sun_cost=100,
                         cd=0, initial_cd=750, is_usable=True, imitator_type=-1)],
-        sun=150, plants=[], game_clock=100, scene=0,
+        sun=0, plants=[], game_clock=100, scene=0,
         game_mode=35, adventure_level=-1,
-        _is_conveyor=True, _belt_uses_sun=True,
     )
 
     result: dict = {"action": "place_plant", "status": "ok"}
     ex._place_plant({"card_index": 0, "row": 1, "col": 2}, state, result)
 
-    ex._injector.put_plant.assert_called_once_with(1, 2, 32, imitater=False, sun_cost=100)
+    ex._injector.put_plant.assert_called_once_with(1, 2, 32, imitater=False, sun_cost=0)
     card_addr = 0x2000 + 0x28 + 0 * 0x50
     ex._injector.clear_seed_card.assert_called_once_with(card_addr)
-    ex._injector.start_card_cooldown.assert_not_called()  # 传送带关一律不开冷却
+    ex._injector.start_card_cooldown.assert_not_called()   # 传送带关一律不开冷却
+    text = str(result)
+    assert "阳光" not in text                              # 无任何阳光提示
+    assert "warning" not in result
 
 
-def test_boss_belt_rejects_when_sun_insufficient(monkeypatch) -> None:
-    """僵王类传送带阳光不足：与普通关同样硬拦（天降阳光会恢复，等下一轮）。"""
+def test_boss_belt_ignores_stale_cooldown(monkeypatch) -> None:
+    """传送带关统一无冷却语义：卡带陈旧 cd 读数也不拦、不提示（0.4.9）。"""
     ex = _bare_executor(planting_mode="putplant", supports_mouse=True)
     monkeypatch.setattr(pvz_executor.PvZExecutor, "_conveyor_verdict", lambda self, s: True)
+    monkeypatch.setattr(pvz_executor.PvZExecutor, "_cell_occupied", lambda self, r, c: True)
     monkeypatch.setattr(pvz_executor.time, "sleep", lambda s: None)
+    ex._mem.read_int.return_value = -1
 
     state = SimpleNamespace(
-        seeds=[SeedInfo(index=0, plant_type=32, name="卷心菜投手", sun_cost=100,
-                        cd=0, initial_cd=750, is_usable=True, imitator_type=-1)],
-        sun=50, plants=[], game_clock=100, scene=0,
+        seeds=[SeedInfo(index=0, plant_type=33, name="花盆", sun_cost=25,
+                        cd=750, initial_cd=750, is_usable=False, imitator_type=-1)],
+        sun=0, plants=[], game_clock=100, scene=0,
         game_mode=35, adventure_level=-1,
-        _is_conveyor=True, _belt_uses_sun=True,
     )
 
-    with pytest.raises(ValueError, match="需要 100 阳光"):
-        ex._place_plant({"card_index": 0, "row": 1, "col": 2}, state, {"action": "place_plant"})
-    ex._injector.put_plant.assert_not_called()
+    result: dict = {"action": "place_plant", "status": "ok"}
+    ex._place_plant({"card_index": 0, "row": 1, "col": 2}, state, result)
+
+    ex._injector.put_plant.assert_called_once_with(1, 2, 33, imitater=False, sun_cost=0)
+    ex._injector.clear_seed_card.assert_called_once()
+    text = str(result)
+    assert "冷却" not in text                              # 无任何冷却提示
 
 
 # --------------------------------------------------------------------------- #
@@ -404,8 +399,8 @@ def test_format_state_bowling_empty_bar_without_collect_hint(monkeypatch) -> Non
     assert "全部空槽时本轮 wait" in text
 
 
-def test_format_state_boss_belt_shows_sun_charged(monkeypatch) -> None:
-    """僵王类传送带（mode=35）：显示真实阳光与扣费语义，无"不计阳光"、无 collect_belt。"""
+def test_format_state_boss_belt_unified_no_sun(monkeypatch) -> None:
+    """僵王类传送带（mode=35）：统一免阳光文案——无真实阳光行、无☀费用、无冷却。"""
     from pvz_memory.reader import PvZStateReader
 
     class _StubMem:
@@ -424,21 +419,27 @@ def test_format_state_boss_belt_shows_sun_charged(monkeypatch) -> None:
     r = PvZStateReader.__new__(PvZStateReader)
     r._mem = _StubMem()
     r._guide_dir = None
+    # 卡片带陈旧 cd 与高额阳光费——传送带关都不得显示
     state = SimpleNamespace(
         game_clock=100, wave=1, total_wave=8, refresh_countdown=0,
         huge_wave_countdown=0, level_end_countdown=0, scene_name="白天",
-        sun=125, seeds=[], plants=[], zombies=[], lawn_mowers=[],
+        sun=0,
+        seeds=[SeedInfo(index=0, plant_type=32, name="卷心菜投手", sun_cost=100,
+                        cd=750, initial_cd=750, is_usable=False, imitator_type=-1)],
+        plants=[], zombies=[], lawn_mowers=[],
         game_mode=35, adventure_level=-1, game_ui=3, in_battle=True, is_paused=False,
         scene=0, items=[], grid_items=[], _plantable_rows=None,
     )
     text = r.format_state(state)
     assert "传送带" in text
-    assert "自动补卡" in text
-    assert "阳光正常计费" in text
-    assert "☀ 阳光: 125" in text
-    assert "不计阳光" not in text
+    assert "不计阳光" in text
+    assert "阳光正常计费" not in text          # 0.4.8 的"有阳光"档文案已废
+    assert "☀ 阳光: 0" not in text             # 不显示真实阳光数字
+    assert "☀不足" not in text                 # 无阳光不足提示
+    assert "⏳" not in text                    # 无冷却提示
+    assert "(100☀)" not in text                # 不显示卡片阳光费用
+    assert "[0] 卷心菜投手 ✅" in text
     assert "立刻用 collect_belt 收取" not in text   # 不引导收取（collect_belt 已禁用）
-    assert "全部空槽时本轮 wait" in text
 
 
 def test_format_state_bowling_minigame_belt_no_sun(monkeypatch) -> None:

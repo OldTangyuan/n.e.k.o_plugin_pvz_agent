@@ -2,7 +2,7 @@
 id = "pvz_agent"
 name = "PVZ Agent"
 description = "让猫娘自己玩《植物大战僵尸》"
-version = "0.4.8"
+version = "0.4.9"
 entry = "plugin.plugins.pvz_agent:PVZAgentPlugin"
 
 [plugin.author]
@@ -64,14 +64,14 @@ tool_call_mode = "fc"
 
 # 种植模式（text 模式的注入种植路线）：
 #   "putplant"   = PutPlant 直接注入（默认，0.4.6 起为主路线）：插件按游戏
-#                  原生语义补齐整套 UI 行为——阳光不足时拒绝种植，种后按
-#                  原生语义开启卡槽冷却（Enable=0/Interval=时长/CoolDown=0/
-#                  Active=1，冷却条显示与倒计时由游戏自己完成），传送带关
-#                  按两档处理（0.4.8）：坚果保龄球类无阳光机制（免阳光 +
-#                  种后消耗卡槽，写 type=-1 等价游戏原生"用后消失"）；
-#                  僵王博士类保留阳光（天降阳光 + 种卡照常扣费 + 卡槽
-#                  消耗 + 不开冷却），并校验占位。速度更快；非原版游戏
-#                  （无 MouseClick 函数地址）自动使用本路线。
+#                  原生语义补齐整套 UI 行为——普通关阳光不足时拒绝种植，种后
+#                  按原生语义开启卡槽冷却（Enable=0/Interval=时长/CoolDown=0/
+#                  Active=1，冷却条显示与倒计时由游戏自己完成）。传送带关
+#                  （坚果保龄球 1/2、僵王博士，判定见 0.4.8 白名单）统一
+#                  免阳光/无冷却/零提示（0.4.9）：按 0 费用注入、种后消耗
+#                  卡槽（写 type=-1 等价游戏原生"用后消失"），并校验占位。
+#                  速度更快；非原版游戏（无 MouseClick 函数地址）自动使用
+#                  本路线。
 #   "mouseclick" = 注入 MouseClick 点卡片 + 点格子（可选）：
 #                  游戏自己处理扣阳光/冷却/占位，游戏内冷却条照常显示。
 planting_mode = "putplant"

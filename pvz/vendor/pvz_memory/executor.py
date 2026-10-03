@@ -26,7 +26,7 @@ from typing import Any, Callable
 from .injector import PvZCodeInjector
 from .memory import PvZMemory, PvZMemoryError
 from .offsets import PLANT_NAMES, PLANT_UPGRADE_MAP
-from .reader import GameState, SeedInfo, belt_uses_sun, level_is_conveyor
+from .reader import GameState, SeedInfo, level_is_conveyor
 
 logger = logging.getLogger(__name__)
 
@@ -248,14 +248,12 @@ class PvZExecutor:
         """传送带判定：**逐轮纯推导**（level_is_conveyor），与 reader 完全一致。
 
         0.4.8 起为权威白名单（GameMode {17,33,35} / 冒险关卡号 {5,35,50}），
-        覆盖坚果保龄球 1/2 与僵王博士（含小游戏/冒险两种形态）。结果额外
-        盖章 state._belt_uses_sun——僵王类传送带有阳光机制（天降阳光+种卡
-        扣阳光），与坚果保龄球类的"不计阳光"行为分开。
+        覆盖坚果保龄球 1/2 与僵王博士（含小游戏/冒险两种形态）。传送带关
+        行为语义（0.4.9 统一免阳光/无冷却/零提示）见 reader 白名单常量注释。
         """
         verdict = level_is_conveyor(state)
         try:
             state._is_conveyor = verdict
-            state._belt_uses_sun = verdict and belt_uses_sun(state)
         except Exception:
             pass
         return verdict
@@ -494,6 +492,8 @@ class PvZExecutor:
             raise ValueError(f"无效卡片序号: {card_index}，共 {len(state.seeds)} 张卡")
 
         seed = state.seeds[card_index]
+        # 传送带判定提前到这里（纯推导幂等）：下方冷却/阳光闸门都要按它分流。
+        conveyor = bool(self._conveyor_verdict(state))
         # 空槽位守卫：传送带关读到的 plant_type=-1 是空卡槽，点了也是无效操作
         # （日志实证：模型对空槽发起种植，注入层报成功但什么都没发生）
         if seed.plant_type < 0:
@@ -501,36 +501,34 @@ class PvZExecutor:
                 f"卡片 [{card_index}] 是空槽位（传送带尚未送来或已用完）——"
                 "先种其他卡；若全部空槽，本轮 wait 等待传送带补卡后重读"
             )
-        # 就绪判定只看冷却——is_usable(0x48) 语义模糊（读取器注释同理），
-        # 传送带关卡收进的卡该标志常为 False，按它拦会造成"显示✅却种不下"。
-        # 0x24 是"已冷却时长"（从 0 递增到 0x28 总时长），cd>0 即在冷却；
-        # 剩余时间 = 总时长 - 已冷却（见 SeedInfo.cd_remaining）。
-        if seed.cd > 0:
-            raise ValueError(
-                f"卡片 [{card_index}] {seed.name} 冷却中（还剩 {seed.cd_remaining / 100:.1f}s）"
-            )
-        belt_sun = bool(getattr(state, "_belt_uses_sun", False))
-        if state.sun < seed.sun_cost:
-            if self._conveyor_verdict(state) is True and not belt_sun:
-                # 无阳光传送带（坚果保龄球类）：不拦、不扣（下方按 0 阳光注入）
-                result["warning"] = (
-                    f"传送带关不计阳光（当前 {state.sun}，卡 {seed.sun_cost}☀）——直接种植"
-                )
-            elif self._belt_suspect(state):
-                # 疑似传送带漏判（已直注过+阳光耗尽+卡就绪）：补阳光放行，
-                # 避免把没有阳光机制的关卡卡死（实测 1-5 坚果保龄球）
-                before = self._safe_sun()
-                self._grant_sun(seed.sun_cost + 50)
-                result["warning"] = (
-                    f"阳光耗尽但卡片就绪（疑似传送带关漏判）——已自动补阳光 "
-                    f"{before}→{self._safe_sun()}，继续种植"
-                )
-            else:
-                # 普通关 与 有阳光传送带（僵王类）：PutPlant 手动扣阳光，
-                # 预检是唯一闸门，硬拦（3.0 语义）
+        if conveyor:
+            # 传送带关统一语义（0.4.9 用户决策）：免阳光、无冷却、零提示。
+            # 跳过冷却与阳光两个闸门——不拦截、不警告（任何"阳光不足/
+            # 冷却中"字样都会误导模型干等），种植按 0 费用直注（见下方）。
+            pass
+        else:
+            # 就绪判定只看冷却——is_usable(0x48) 语义模糊（读取器注释同理）。
+            # 0x24 是"已冷却时长"（从 0 递增到 0x28 总时长），cd>0 即在冷却；
+            # 剩余时间 = 总时长 - 已冷却（见 SeedInfo.cd_remaining）。
+            if seed.cd > 0:
                 raise ValueError(
-                    f"卡片 [{card_index}] {seed.name} 需要 {seed.sun_cost} 阳光，当前只有 {state.sun}"
+                    f"卡片 [{card_index}] {seed.name} 冷却中（还剩 {seed.cd_remaining / 100:.1f}s）"
                 )
+            if state.sun < seed.sun_cost:
+                if self._belt_suspect(state):
+                    # 疑似传送带漏判（已直注过+阳光耗尽+卡就绪）：补阳光放行，
+                    # 避免把没有阳光机制的关卡卡死（实测 1-5 坚果保龄球）
+                    before = self._safe_sun()
+                    self._grant_sun(seed.sun_cost + 50)
+                    result["warning"] = (
+                        f"阳光耗尽但卡片就绪（疑似传送带关漏判）——已自动补阳光 "
+                        f"{before}→{self._safe_sun()}，继续种植"
+                    )
+                else:
+                    # 普通关：PutPlant 手动扣阳光，预检是唯一闸门，硬拦（3.0 语义）
+                    raise ValueError(
+                        f"卡片 [{card_index}] {seed.name} 需要 {seed.sun_cost} 阳光，当前只有 {state.sun}"
+                    )
 
         # 教学关行号校正（0.4.2）：教学关只在草皮行有割草机，reader 由割草机
         # 真实行号推导草皮行盖章 state._plantable_rows。模型按"row 0 起算"
@@ -580,7 +578,7 @@ class PvZExecutor:
                         f"行{row}列{col} 已有 {p.name}，不能叠种 {seed.name}"
                     )
 
-        conveyor = bool(self._conveyor_verdict(state))
+        # conveyor 已在闸门前推导（此处直接复用，纯推导幂等）
         plant_type = seed.imitator_type if seed.imitator_type >= 0 else seed.plant_type
         imitater = seed.imitator_type >= 0
 
@@ -636,13 +634,14 @@ class PvZExecutor:
                 raise ValueError(
                     f"卡片 [{card_index}] 的植物类型异常（{plant_type}），放弃直接注入以防崩溃"
                 )
-            # 冷却闸门只有一处：顶部的 seed.cd>0（游戏原生冷却的内存读数）。
+            # 冷却闸门只有一处：顶部的 seed.cd>0（游戏原生冷却的内存读数），
+            # 且只对普通关生效（传送带关统一无冷却语义，见闸门注释）。
             # 每个动作执行前 execute_tool_call 都会重读内存，本动作直注成功
             # 后的 0.3s 验证等待足以让游戏把 cd 从 0 起跳，同轮连种同样会被
             # 拦截。传送带关由喂卡节奏管理，没有冷却。
-            # 阳光：无阳光传送带按 0 注入；有阳光传送带（僵王类）与普通关
-            # 按真实费用注入（put_plant 会手动扣阳光）。
-            sun_cost = 0 if (conveyor and not belt_sun) else seed.sun_cost
+            # 阳光（0.4.9 统一语义）：传送带关一律按 0 费用注入（不扣阳光）；
+            # 普通关按真实费用注入（put_plant 会手动扣阳光）。
+            sun_cost = 0 if conveyor else seed.sun_cost
             logger.info("[PvZ执行] 💉 直接注入 PutPlant 行%s列%s type=%s imitater=%s 阳光=%s",
                         row, col, plant_type, imitater, sun_cost)
             self._injector.put_plant(row, col, plant_type, imitater=imitater,
