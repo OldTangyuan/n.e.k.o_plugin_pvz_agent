@@ -25,7 +25,12 @@ from typing import Any, Callable
 
 from .injector import PvZCodeInjector
 from .memory import PvZMemory, PvZMemoryError
-from .offsets import PLANT_NAMES, PLANT_UPGRADE_MAP
+from .offsets import (
+    PLANT_NAMES,
+    PLANT_POT_TYPES,
+    PLANT_PUMPKIN_TYPE,
+    PLANT_UPGRADE_MAP,
+)
 from .reader import GameState, SeedInfo, level_is_conveyor
 
 logger = logging.getLogger(__name__)
@@ -571,11 +576,42 @@ class PvZExecutor:
                     f"行{row}列{col} 是 {target_plant.name}，不是 {base_name}"
                 )
         else:
-            # 普通植物：目标格子必须空闲，不能叠种
-            for p in state.plants:
-                if p.row == row and p.col == col:
+            # 占用判定（0.4.10）：按游戏原生"一格三槽位"语义——
+            #   基座槽：花盆/荷叶（最多 1）；植物槽：普通植物（最多 1）；
+            #   外壳槽：南瓜壳（最多 1）。
+            # 花盆/荷叶上叠种、往空南瓜里种、给已有植物围南瓜都是正常玩法
+            # （0.4.9 前见植物就拦，屋顶关"花盆上不能叠种"根本没法玩）。
+            # 规则：种基座要完全空格；种南瓜只看外壳槽；种普通植物只看植物槽。
+            existing = [p for p in state.plants if p.row == row and p.col == col]
+            if existing:
+                occupant_names = "+".join(p.name for p in existing)
+                has_pot = any(p.plant_type in PLANT_POT_TYPES for p in existing)
+                has_pumpkin = any(p.plant_type == PLANT_PUMPKIN_TYPE for p in existing)
+                normals = [p for p in existing
+                           if p.plant_type not in PLANT_POT_TYPES
+                           and p.plant_type != PLANT_PUMPKIN_TYPE]
+                seed_type = seed.plant_type
+                if seed_type in PLANT_POT_TYPES:
+                    # 基座只能落在完全空格（不能垫在植物/南瓜下面）
                     raise ValueError(
-                        f"行{row}列{col} 已有 {p.name}，不能叠种 {seed.name}"
+                        f"行{row}列{col} 已有 {occupant_names}——花盆/荷叶只能种在空格上"
+                    )
+                if seed_type == PLANT_PUMPKIN_TYPE:
+                    # 外壳槽：一格一个南瓜壳；围在植物/基座外都行
+                    if has_pumpkin:
+                        raise ValueError(
+                            f"行{row}列{col} 已有 {occupant_names}——一格只能围一个南瓜壳"
+                        )
+                elif normals:
+                    # 植物槽被占：有基座说"基座里已种"，否则说不能叠种
+                    if has_pot:
+                        raise ValueError(
+                            f"行{row}列{col} 的花盆/荷叶里已种了 "
+                            f"{'+'.join(p.name for p in normals)}——一个基座只能种一株，"
+                            "换空基座或空格"
+                        )
+                    raise ValueError(
+                        f"行{row}列{col} 已有 {occupant_names}，不能叠种 {seed.name}"
                     )
 
         # conveyor 已在闸门前推导（此处直接复用，纯推导幂等）
@@ -611,7 +647,7 @@ class PvZExecutor:
             # 不变且一直种不下（0.4.1 实测）。同轮重复种植由游戏自己拒绝
             # （点击无效果）。
             # 种后轻验证：游戏拒绝（阳光/冷却/占用）时点击不产生植物
-            if self._cell_occupied(row, col):
+            if self._cell_has_plant_type(row, col, plant_type):
                 result["detail"] = (
                     f"种植 {seed.name} 到 行{row}列{col}（MouseClick，阳光/冷却由游戏处理）"
                 )
@@ -647,9 +683,11 @@ class PvZExecutor:
             self._injector.put_plant(row, col, plant_type, imitater=imitater,
                                      sun_cost=sun_cost)
             result["direct"] = True
-            # 种后内存验证：PutPlant 不查游戏规则，可能被静默拒绝
+            # 种后内存验证：PutPlant 不查游戏规则，可能被静默拒绝。
+            # 0.4.10 起按类型验证——花盆/荷叶/南瓜让格子本来就被占，
+            # 只看 row/col 会把"没种上"误判成成功。
             time.sleep(0.3)
-            cell_ok = self._cell_occupied(row, col)
+            cell_ok = self._cell_has_plant_type(row, col, plant_type)
             if cell_ok:
                 self._direct_plants += 1
                 # 游戏原生冷却：Enable=0/Interval=时长/CoolDown=0/Active=1，
@@ -844,9 +882,11 @@ class PvZExecutor:
             logger.warning("[PvZ执行] 补阳光失败: %s", exc)
 
     def _cell_occupied(self, row: int, col: int) -> bool:
-        """读内存判断格子上是否有植物（种植结果确认用）。读取失败按 False 处理。
+        """读内存判断格子上是否有植物（读取失败按 False 处理）。
 
         与 reader._read_plants 同源的简化版：只比对 row/col，避免循环依赖。
+        叠种场景（0.4.10）请用 _cell_has_plant_type——花盆/荷叶让格子
+        本来就被占，只看 row/col 会被基座骗过。
         """
         try:
             off = self._mem.offsets
@@ -862,6 +902,34 @@ class PvZExecutor:
                         continue
                     if (self._mem.read_int(addr + off.p_row) == row
                             and self._mem.read_int(addr + off.p_col) == col):
+                        return True
+                except Exception:
+                    break
+            return False
+        except Exception:
+            return False
+
+    def _cell_has_plant_type(self, row: int, col: int, plant_type: int) -> bool:
+        """读内存判断格子上是否有指定类型的植物（种植结果确认，0.4.10）.
+
+        在花盆/荷叶上叠种、往南瓜里种之后，格子本来就有植物——按类型
+        匹配才能确认"这次种的东西"真的落地。读取失败按 False 处理。
+        """
+        try:
+            off = self._mem.offsets
+            mo = self._mem.main_object
+            plant_array = self._mem.read_pointer(mo + off.plant_array)
+            if not plant_array:
+                return False
+            count_max = self._mem.read_int(mo + off.plant_count_max)
+            for i in range(min(max(count_max, 0), 200)):
+                addr = plant_array + i * off.plant_struct_size
+                try:
+                    if self._mem.read_bool(addr + off.p_is_disappeared):
+                        continue
+                    if (self._mem.read_int(addr + off.p_row) == row
+                            and self._mem.read_int(addr + off.p_col) == col
+                            and self._mem.read_int(addr + off.p_type) == plant_type):
                         return True
                 except Exception:
                     break

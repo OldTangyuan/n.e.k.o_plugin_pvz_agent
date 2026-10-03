@@ -173,7 +173,7 @@ def test_place_plant_putplant_starts_native_cooldown(monkeypatch) -> None:
     state = SimpleNamespace(seeds=[seed], sun=9999, plants=[], game_clock=100, scene=0)
 
     monkeypatch.setattr(pvz_executor.PvZExecutor, "_conveyor_verdict", lambda self, s: False)
-    monkeypatch.setattr(pvz_executor.PvZExecutor, "_cell_occupied", lambda self, r, c: True)
+    monkeypatch.setattr(pvz_executor.PvZExecutor, "_cell_has_plant_type", lambda self, r, c, t: True)
     monkeypatch.setattr(pvz_executor.time, "sleep", lambda s: None)
     ex._mem.read_int.side_effect = [0, 750]
     ex._mem.read_bool.return_value = True

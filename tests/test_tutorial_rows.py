@@ -176,7 +176,7 @@ def _putplant_env(monkeypatch, plantable, plants=(), sun: int = 9999):
     ex = _bare_executor(planting_mode="putplant")
     ex._injector.supports_mouse = False
     monkeypatch.setattr(pvz_executor.PvZExecutor, "_conveyor_verdict", lambda self, s: False)
-    monkeypatch.setattr(pvz_executor.PvZExecutor, "_cell_occupied", lambda self, r, c: True)
+    monkeypatch.setattr(pvz_executor.PvZExecutor, "_cell_has_plant_type", lambda self, r, c, t: True)
     monkeypatch.setattr(pvz_executor.time, "sleep", lambda s: None)
     ex._mem.read_int.side_effect = [0, 750]
     ex._mem.read_bool.return_value = True
@@ -214,7 +214,7 @@ def test_place_plant_redirect_clamps_to_grass_range(monkeypatch) -> None:
 
 def test_place_plant_redirect_applies_before_occupancy_check(monkeypatch) -> None:
     """重定向后的格子被占 → 报"已有植物"而不是先撞原行的占用判定。"""
-    occupied = SimpleNamespace(row=2, col=3, name="向日葵")
+    occupied = SimpleNamespace(row=2, col=3, plant_type=1, name="向日葵")
     ex, state = _putplant_env(monkeypatch, plantable=[2], plants=[occupied])
     with pytest.raises(ValueError, match="行2列3 已有 向日葵"):
         ex._place_plant({"card_index": 0, "row": 0, "col": 3}, state, {})

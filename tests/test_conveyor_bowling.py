@@ -178,7 +178,7 @@ def test_conveyor_putplant_consumes_card(monkeypatch) -> None:
     """1-5 + putplant：直注成功后卡槽写 -1（游戏原生"用后消失"语义）。"""
     ex = _bare_executor(planting_mode="putplant", supports_mouse=True)
     monkeypatch.setattr(pvz_executor.PvZExecutor, "_conveyor_verdict", lambda self, s: True)
-    monkeypatch.setattr(pvz_executor.PvZExecutor, "_cell_occupied", lambda self, r, c: True)
+    monkeypatch.setattr(pvz_executor.PvZExecutor, "_cell_has_plant_type", lambda self, r, c, t: True)
     monkeypatch.setattr(pvz_executor.time, "sleep", lambda s: None)
     ex._mem.read_int.return_value = -1  # 消耗回读: sc_type = -1
 
@@ -197,7 +197,7 @@ def test_conveyor_putplant_explosive_nut_passes_guard(monkeypatch) -> None:
     """爆炸坚果（type=49）已入册：防崩溃守卫放行 + 照常消耗卡槽。"""
     ex = _bare_executor(planting_mode="putplant", supports_mouse=False)
     monkeypatch.setattr(pvz_executor.PvZExecutor, "_conveyor_verdict", lambda self, s: True)
-    monkeypatch.setattr(pvz_executor.PvZExecutor, "_cell_occupied", lambda self, r, c: True)
+    monkeypatch.setattr(pvz_executor.PvZExecutor, "_cell_has_plant_type", lambda self, r, c, t: True)
     monkeypatch.setattr(pvz_executor.time, "sleep", lambda s: None)
     ex._mem.read_int.return_value = -1
 
@@ -214,7 +214,7 @@ def test_conveyor_consume_survives_seed_array_unavailable(monkeypatch) -> None:
     ex = _bare_executor(planting_mode="putplant", supports_mouse=False)
     ex._mem.read_pointer.return_value = 0
     monkeypatch.setattr(pvz_executor.PvZExecutor, "_conveyor_verdict", lambda self, s: True)
-    monkeypatch.setattr(pvz_executor.PvZExecutor, "_cell_occupied", lambda self, r, c: True)
+    monkeypatch.setattr(pvz_executor.PvZExecutor, "_cell_has_plant_type", lambda self, r, c, t: True)
     monkeypatch.setattr(pvz_executor.time, "sleep", lambda s: None)
 
     result: dict = {"action": "place_plant", "status": "ok"}
@@ -228,7 +228,7 @@ def test_conveyor_consume_even_when_nut_rolled_away(monkeypatch) -> None:
     """坚果落地即滚/爆：占位验证 False 也要消耗卡槽（0.4.5 实测漏消耗教训）。"""
     ex = _bare_executor(planting_mode="putplant", supports_mouse=True)
     monkeypatch.setattr(pvz_executor.PvZExecutor, "_conveyor_verdict", lambda self, s: True)
-    monkeypatch.setattr(pvz_executor.PvZExecutor, "_cell_occupied", lambda self, r, c: False)
+    monkeypatch.setattr(pvz_executor.PvZExecutor, "_cell_has_plant_type", lambda self, r, c, t: False)
     monkeypatch.setattr(pvz_executor.time, "sleep", lambda s: None)
     ex._mem.read_int.return_value = -1
 
@@ -246,7 +246,7 @@ def test_normal_level_putplant_unchanged(monkeypatch) -> None:
     """普通关 + putplant 配置：仍走 PutPlant + 原生冷却，不消耗卡槽（回归）。"""
     ex = _bare_executor(planting_mode="putplant", supports_mouse=True)
     monkeypatch.setattr(pvz_executor.PvZExecutor, "_conveyor_verdict", lambda self, s: False)
-    monkeypatch.setattr(pvz_executor.PvZExecutor, "_cell_occupied", lambda self, r, c: True)
+    monkeypatch.setattr(pvz_executor.PvZExecutor, "_cell_has_plant_type", lambda self, r, c, t: True)
     monkeypatch.setattr(pvz_executor.time, "sleep", lambda s: None)
     ex._mem.read_int.side_effect = [0, 750]
     ex._mem.read_bool.return_value = True
@@ -272,7 +272,7 @@ def test_boss_belt_plants_free_even_with_zero_sun(monkeypatch) -> None:
     """
     ex = _bare_executor(planting_mode="putplant", supports_mouse=True)
     monkeypatch.setattr(pvz_executor.PvZExecutor, "_conveyor_verdict", lambda self, s: True)
-    monkeypatch.setattr(pvz_executor.PvZExecutor, "_cell_occupied", lambda self, r, c: True)
+    monkeypatch.setattr(pvz_executor.PvZExecutor, "_cell_has_plant_type", lambda self, r, c, t: True)
     monkeypatch.setattr(pvz_executor.time, "sleep", lambda s: None)
     ex._mem.read_int.return_value = -1
 
@@ -299,7 +299,7 @@ def test_boss_belt_ignores_stale_cooldown(monkeypatch) -> None:
     """传送带关统一无冷却语义：卡带陈旧 cd 读数也不拦、不提示（0.4.9）。"""
     ex = _bare_executor(planting_mode="putplant", supports_mouse=True)
     monkeypatch.setattr(pvz_executor.PvZExecutor, "_conveyor_verdict", lambda self, s: True)
-    monkeypatch.setattr(pvz_executor.PvZExecutor, "_cell_occupied", lambda self, r, c: True)
+    monkeypatch.setattr(pvz_executor.PvZExecutor, "_cell_has_plant_type", lambda self, r, c, t: True)
     monkeypatch.setattr(pvz_executor.time, "sleep", lambda s: None)
     ex._mem.read_int.return_value = -1
 
