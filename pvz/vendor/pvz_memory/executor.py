@@ -26,7 +26,7 @@ from typing import Any, Callable
 from .injector import PvZCodeInjector
 from .memory import PvZMemory, PvZMemoryError
 from .offsets import PLANT_NAMES, PLANT_UPGRADE_MAP
-from .reader import GameState, SeedInfo, level_is_conveyor
+from .reader import GameState, SeedInfo, belt_uses_sun, level_is_conveyor
 
 logger = logging.getLogger(__name__)
 
@@ -247,13 +247,15 @@ class PvZExecutor:
     def _conveyor_verdict(self, state: Any) -> bool:
         """传送带判定：**逐轮纯推导**（level_is_conveyor），与 reader 完全一致。
 
-        1-5 坚果保龄球（mode=0 但 adventure_level=5）由 level_is_conveyor
-        直接识别（0.4.3）；未知形态的冒险传送带关仍由 _belt_suspect 阳光
-        自愈兜底（阳光耗尽+卡槽有空位 → 自动补阳光放行）。
+        0.4.8 起为权威白名单（GameMode {17,33,35} / 冒险关卡号 {5,35,50}），
+        覆盖坚果保龄球 1/2 与僵王博士（含小游戏/冒险两种形态）。结果额外
+        盖章 state._belt_uses_sun——僵王类传送带有阳光机制（天降阳光+种卡
+        扣阳光），与坚果保龄球类的"不计阳光"行为分开。
         """
         verdict = level_is_conveyor(state)
         try:
             state._is_conveyor = verdict
+            state._belt_uses_sun = verdict and belt_uses_sun(state)
         except Exception:
             pass
         return verdict
@@ -507,9 +509,10 @@ class PvZExecutor:
             raise ValueError(
                 f"卡片 [{card_index}] {seed.name} 冷却中（还剩 {seed.cd_remaining / 100:.1f}s）"
             )
+        belt_sun = bool(getattr(state, "_belt_uses_sun", False))
         if state.sun < seed.sun_cost:
-            if self._conveyor_verdict(state) is True:
-                # 传送带关没有阳光机制：不拦、不扣（下方按 0 阳光注入）
+            if self._conveyor_verdict(state) is True and not belt_sun:
+                # 无阳光传送带（坚果保龄球类）：不拦、不扣（下方按 0 阳光注入）
                 result["warning"] = (
                     f"传送带关不计阳光（当前 {state.sun}，卡 {seed.sun_cost}☀）——直接种植"
                 )
@@ -523,7 +526,8 @@ class PvZExecutor:
                     f"{before}→{self._safe_sun()}，继续种植"
                 )
             else:
-                # 普通关：PutPlant 手动扣阳光，预检是唯一闸门，硬拦（3.0 语义）
+                # 普通关 与 有阳光传送带（僵王类）：PutPlant 手动扣阳光，
+                # 预检是唯一闸门，硬拦（3.0 语义）
                 raise ValueError(
                     f"卡片 [{card_index}] {seed.name} 需要 {seed.sun_cost} 阳光，当前只有 {state.sun}"
                 )
@@ -636,7 +640,9 @@ class PvZExecutor:
             # 每个动作执行前 execute_tool_call 都会重读内存，本动作直注成功
             # 后的 0.3s 验证等待足以让游戏把 cd 从 0 起跳，同轮连种同样会被
             # 拦截。传送带关由喂卡节奏管理，没有冷却。
-            sun_cost = 0 if conveyor else seed.sun_cost
+            # 阳光：无阳光传送带按 0 注入；有阳光传送带（僵王类）与普通关
+            # 按真实费用注入（put_plant 会手动扣阳光）。
+            sun_cost = 0 if (conveyor and not belt_sun) else seed.sun_cost
             logger.info("[PvZ执行] 💉 直接注入 PutPlant 行%s列%s type=%s imitater=%s 阳光=%s",
                         row, col, plant_type, imitater, sun_cost)
             self._injector.put_plant(row, col, plant_type, imitater=imitater,
@@ -886,38 +892,36 @@ class PvZExecutor:
             return -1
 
     def _collect_belt(self, args: dict, state: GameState, result: dict) -> None:
-        """传送带关卡：点击传送带把植物收进卡片栏（注入 MouseClick + 收数校验）。
+        """collect_belt — **已全面禁用**（0.4.8），任何调用都会收到明确报错.
 
-        原理：传送带上未收取的植物会堆积排队，点击即被收进卡片栏。
-        由于拿不到传送带队列的内存布局（偏移未开源），这里对排队区做
-        **扫描点击 + 收数校验**：每次点击后重读卡片数，计数增加才算收
-        到一张；整轮扫描都没收到就停（队列空 / 卡栏满）。
+        历史：曾假设"传送带上未收取的植物会堆积排队，点击收进卡片栏"，
+        由于拿不到传送带队列的内存布局，实现为**扫描点击 + 收数校验**
+        （点击 _BELT_CLICK_POINTS，点击后卡栏计数增加即算收到）。
 
-        Args (从 args 读):
-            count: 想收取的张数（默认 3，上限 10——卡片栏容量）。
+        0.4.7/0.4.8 实测否定了该假设：
+        - 原版全部传送带关（坚果保龄球1/2、僵王博士的小游戏与冒险形态）
+          的卡栏都由传送带**自动喂卡**，没有"待收取队列"，无需收取；
+        - 扫描点与卡片栏区域重叠，点击只会误拾栏内卡（日志实证：
+          "扫描点(170,74)误拾卡片栏卡，已放回"）；
+        - "收到 N 张卡"多为传送带自动补卡被误记成点击功劳（假阳性），
+          且槽位序号曾被误当植物类型取名（1-5 报"收到 向日葵"）。
+        因此非传送带关与传送带关都直接报错，并给模型正确出路。
         """
         if not self._conveyor_verdict(state):
             raise ValueError(
                 "本关不是传送带关（有固定卡组或模式未知）——卡槽里的卡直接 place_plant 种下，"
                 "不要 collect_belt（会误点卡片栏）"
             )
-        try:
-            _mode = int(getattr(state, "game_mode", -1))
-        except (TypeError, ValueError):
-            _mode = -1
-        if _mode == 0:
-            # 冒险模式传送带关（坚果保龄球类，0.4.6）：传送带自动向卡栏补卡，
-            # 没有"待收取队列"。扫描点与卡片栏区域重叠（_BELT_CLICK_POINTS），
-            # 点击只会误拾栏内卡（实测日志：扫描点(170,74)误拾卡片栏卡）；
-            # 计数上涨还会把传送带自动补卡误记成点击功劳（假阳性）。
-            # 直接禁用，给模型明确出路。
-            raise ValueError(
-                "本关传送带会自动把新卡填进卡栏（坚果保龄球类），无需也不可收取——"
-                "collect_belt 在本关已禁用。直接 place_plant 卡栏已有的卡；"
-                "全部空槽时本轮 wait 等待传送带补卡后重读"
-            )
-        if not self._injector:
-            raise PvZMemoryError("collect_belt 需要代码注入器（当前为鼠标 fallback 模式）")
+        # 传送带关一律禁用（0.4.8）：原版全部传送带关（坚果保龄球1/2、僵王博士
+        # 的小游戏与冒险形态）的卡栏都由传送带自动喂卡，没有"待收取队列"。
+        # 扫描点与卡片栏区域重叠（_BELT_CLICK_POINTS），点击只会误拾栏内卡
+        # （实测日志：扫描点(170,74)误拾卡片栏卡）；计数上涨还会把传送带自动
+        # 补卡误记成点击功劳（假阳性）。
+        raise ValueError(
+            "本关是传送带关：卡栏由传送带自动喂入，卡用后消失并自动补新卡——"
+            "collect_belt 无用且会误点卡片栏，已禁用。直接 place_plant 卡栏已有的卡；"
+            "全部空槽时本轮 wait 等待传送带补卡后重读"
+        )
 
         try:
             want = int(args.get("count", 3) or 3)

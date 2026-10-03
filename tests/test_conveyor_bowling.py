@@ -1,4 +1,4 @@
-"""1-5 坚果保龄球（冒险模式传送带关）单元测试（0.4.3，0.4.4-0.4.6 扩展）.
+"""传送带关判定与行为单元测试（0.4.3 起逐步扩展，0.4.8 重构判定）.
 
 背景：1-5 是冒险模式内的传送带关——实测 game_mode=0、Board+0x5550=5、
 无阳光机制、卡槽被传送带喂满坚果。旧判定的两个坑：
@@ -7,15 +7,18 @@
 - 爆炸坚果（type=49，AsmVsZombies 枚举 48=模仿者、49=爆炸坚果）不在
   PLANT_NAMES，被防崩溃守卫拦截"无法种植"。
 
-修复：
-- level_is_conveyor 增加冒险传送带例外（mode=0 且 adventure_level∈{5,35}，
-  不看卡槽；5=1-5 实机验证，35=4-5 同系列推算）；
-- PLANT_NAMES/PLANT_SUN_COST 补 49；
-- 传送带关维持 putplant 直注（用户选定路线），直注调用后由
-  _consume_seed_card 写 type=-1 模拟游戏原生"用后消失"——传送带按原生
-  节奏向空槽补新坚果（实测存活内存里游戏自己消耗过的槽就是 -1）；
-- collect_belt 在冒险传送带关禁用（0.4.6：扫描点与卡栏重叠，点击只会
-  误拾栏内卡；1-5 传送带自动补卡，无需收取），状态文本同步不再引导。
+0.4.8 重构：判定改为 **GameMode/冒险关卡号权威白名单**——
+- GameMode（PvzBase+0x7F8）∈ {17, 33, 35}：坚果保龄球1/2、僵王博士的小游戏
+  （来源：PvZ 反编译 enum GameMode；锚点验证：僵王关实机读数 35 =
+  GAMEMODE_CHALLENGE_FINAL_BOSS）；
+- game_mode=0 且 adventure_level（Board+0x5550）∈ {5, 35, 50}：
+  1-5 / 4-5 / 5-10。
+旧"卡槽全空"瞬态启发式删除：传送带开局几十秒卡栏就被喂满，僵王关全程
+被误判普通关的根因。
+
+传送带分两档行为：
+- 无阳光（坚果保龄球类）：免阳光、种后消耗卡槽；
+- 有阳光（僵王类）：天降阳光 + 种卡照常扣费 + 卡牌消耗。
 
 只测纯逻辑，不依赖真实游戏进程；非 Windows 跳过。
 """
@@ -41,7 +44,12 @@ from pvz_memory import executor as pvz_executor  # noqa: E402
 from pvz_memory.executor import PvZExecutor  # noqa: E402
 from pvz_memory.injector import PvZCodeInjector  # noqa: E402
 from pvz_memory.offsets import PLANT_NAMES, PLANT_SUN_COST, PvZOffsets  # noqa: E402
-from pvz_memory.reader import GameState, SeedInfo, level_is_conveyor  # noqa: E402
+from pvz_memory.reader import (  # noqa: E402
+    GameState,
+    SeedInfo,
+    belt_uses_sun,
+    level_is_conveyor,
+)
 
 
 def _seed(plant_type: int = 3) -> SeedInfo:
@@ -79,19 +87,65 @@ def test_bowling2_4_5_also_conveyor() -> None:
     assert level_is_conveyor(state) is True
 
 
+def test_boss_minigame_is_conveyor() -> None:
+    """僵王博士的复仇小游戏：实机 game_mode=35（=FINAL_BOSS）+ 卡栏已喂满 → 传送带关。
+
+    这是 0.4.8 重构的直接动因：旧"卡槽全空"启发式在传送带喂满卡后恒误判
+    普通关（实测卡槽=[32,20,32,14,20,33,33,39,...] 全程被判普通关）。
+    """
+    state = SimpleNamespace(
+        game_mode=35,
+        seeds=[_seed(32), _seed(20), _seed(14), _seed(33), _seed(39)],
+    )
+    assert level_is_conveyor(state) is True
+
+
+def test_bowling_minigame_modes_are_conveyor() -> None:
+    """小游戏版坚果保龄球 1/2（GameMode 17/33）判传送带，且无阳光。"""
+    for mode in (17, 33):
+        state = SimpleNamespace(game_mode=mode, seeds=[_seed(3)])
+        assert level_is_conveyor(state) is True
+        assert belt_uses_sun(state) is False
+
+
+def test_boss_belt_uses_sun() -> None:
+    """僵王类传送带保留阳光机制（天降阳光 + 种卡扣阳光）。"""
+    assert belt_uses_sun(SimpleNamespace(game_mode=35, seeds=[])) is True
+    assert belt_uses_sun(SimpleNamespace(game_mode=0, adventure_level=50, seeds=[])) is True
+    assert belt_uses_sun(SimpleNamespace(game_mode=0, adventure_level=5, seeds=[])) is False
+    assert belt_uses_sun(SimpleNamespace(game_mode=17, seeds=[])) is False
+
+
+def test_adventure_final_boss_5_10_is_conveyor() -> None:
+    """冒险 5-10（最终 boss，adventure_level=50）也是传送带关（有阳光）。"""
+    state = SimpleNamespace(game_mode=0, adventure_level=50, seeds=[_seed(33)])
+    assert level_is_conveyor(state) is True
+    assert belt_uses_sun(state) is True
+
+
+def test_non_belt_modes_stay_normal_even_with_empty_bar() -> None:
+    """非传送带模式（生存/禅境/未知）即使卡栏全空也判普通关（旧瞬态启发式已删）。"""
+    for mode in (1, 2, 4, 50, -1):
+        state = SimpleNamespace(game_mode=mode, seeds=[])
+        assert level_is_conveyor(state) is False
+    # 有固定卡组的模式（如生存卡已选）同样普通关
+    state = SimpleNamespace(game_mode=2, seeds=[_seed(3)])
+    assert level_is_conveyor(state) is False
+
+
 def test_bowling_exception_needs_adventure_mode() -> None:
     """只有冒险模式（mode=0）才走关卡号例外，其他模式维持原判定。"""
     state = SimpleNamespace(game_mode=2, adventure_level=5, seeds=[_seed(3)])
     assert level_is_conveyor(state) is False
 
 
-def test_missing_adventure_level_keeps_old_semantics() -> None:
-    """无 adventure_level 盖章（旧调用方/读失败）→ 原判定不变。"""
+def test_missing_adventure_level_defaults_normal() -> None:
+    """adventure_level 缺失/读失败：保守判普通关，绝不误判传送带。"""
     state = SimpleNamespace(game_mode=0, seeds=[])
     assert level_is_conveyor(state) is False
-    state = SimpleNamespace(game_mode=2, seeds=[])
-    assert level_is_conveyor(state) is True
-    state = SimpleNamespace(game_mode=2, seeds=[_seed(3)])
+    state = SimpleNamespace(game_mode=0, adventure_level=-1, seeds=[])
+    assert level_is_conveyor(state) is False
+    state = SimpleNamespace(game_mode=-1, seeds=[])
     assert level_is_conveyor(state) is False
 
 
@@ -225,6 +279,51 @@ def test_normal_level_putplant_unchanged(monkeypatch) -> None:
     ex._injector.clear_seed_card.assert_not_called()
 
 
+def test_boss_belt_putplant_charges_sun_and_consumes(monkeypatch) -> None:
+    """僵王类传送带（有阳光）：真实费用注入 + 手动扣阳光 + 卡槽消耗 + 不开冷却。"""
+    ex = _bare_executor(planting_mode="putplant", supports_mouse=True)
+    monkeypatch.setattr(pvz_executor.PvZExecutor, "_conveyor_verdict",
+                        lambda self, s: True)   # 盖章由该实现负责；测试手工补 stamp
+    monkeypatch.setattr(pvz_executor.PvZExecutor, "_cell_occupied", lambda self, r, c: True)
+    monkeypatch.setattr(pvz_executor.time, "sleep", lambda s: None)
+    ex._mem.read_int.return_value = -1
+
+    state = SimpleNamespace(
+        seeds=[SeedInfo(index=0, plant_type=32, name="卷心菜投手", sun_cost=100,
+                        cd=0, initial_cd=750, is_usable=True, imitator_type=-1)],
+        sun=150, plants=[], game_clock=100, scene=0,
+        game_mode=35, adventure_level=-1,
+        _is_conveyor=True, _belt_uses_sun=True,
+    )
+
+    result: dict = {"action": "place_plant", "status": "ok"}
+    ex._place_plant({"card_index": 0, "row": 1, "col": 2}, state, result)
+
+    ex._injector.put_plant.assert_called_once_with(1, 2, 32, imitater=False, sun_cost=100)
+    card_addr = 0x2000 + 0x28 + 0 * 0x50
+    ex._injector.clear_seed_card.assert_called_once_with(card_addr)
+    ex._injector.start_card_cooldown.assert_not_called()  # 传送带关一律不开冷却
+
+
+def test_boss_belt_rejects_when_sun_insufficient(monkeypatch) -> None:
+    """僵王类传送带阳光不足：与普通关同样硬拦（天降阳光会恢复，等下一轮）。"""
+    ex = _bare_executor(planting_mode="putplant", supports_mouse=True)
+    monkeypatch.setattr(pvz_executor.PvZExecutor, "_conveyor_verdict", lambda self, s: True)
+    monkeypatch.setattr(pvz_executor.time, "sleep", lambda s: None)
+
+    state = SimpleNamespace(
+        seeds=[SeedInfo(index=0, plant_type=32, name="卷心菜投手", sun_cost=100,
+                        cd=0, initial_cd=750, is_usable=True, imitator_type=-1)],
+        sun=50, plants=[], game_clock=100, scene=0,
+        game_mode=35, adventure_level=-1,
+        _is_conveyor=True, _belt_uses_sun=True,
+    )
+
+    with pytest.raises(ValueError, match="需要 100 阳光"):
+        ex._place_plant({"card_index": 0, "row": 1, "col": 2}, state, {"action": "place_plant"})
+    ex._injector.put_plant.assert_not_called()
+
+
 # --------------------------------------------------------------------------- #
 #  injector.clear_seed_card：写入序列
 # --------------------------------------------------------------------------- #
@@ -238,7 +337,7 @@ def test_clear_seed_card_writes_minus_one() -> None:
 
 
 # --------------------------------------------------------------------------- #
-#  collect_belt：冒险传送带关禁用（0.4.6）+ 假名修复
+#  collect_belt：全部传送带关禁用（0.4.8）
 # --------------------------------------------------------------------------- #
 
 def test_collect_belt_refused_on_adventure_belt(monkeypatch) -> None:
@@ -251,25 +350,26 @@ def test_collect_belt_refused_on_adventure_belt(monkeypatch) -> None:
     ex._injector.mouse_click.assert_not_called()
 
 
-def test_collect_belt_still_allowed_on_minigame_belt(monkeypatch) -> None:
-    """非冒险传送带（小游戏类，mode=2）：collect_belt 照常可用（回归）。"""
+def test_collect_belt_refused_on_boss_belt(monkeypatch) -> None:
+    """僵王类传送带（mode=35）同样自动喂卡：collect_belt 拒绝（0.4.8）。"""
     ex = _bare_executor(planting_mode="putplant")
     monkeypatch.setattr(pvz_executor.PvZExecutor, "_conveyor_verdict", lambda self, s: True)
-    monkeypatch.setattr(pvz_executor.PvZExecutor, "_cancel_cursor", lambda self: None)
-    # 第一次读数 2 张，点击扫描点一次后变 3 张 → 模拟成功收取
-    counts = iter([2, 3])
-    monkeypatch.setattr(pvz_executor.PvZExecutor, "_valid_seed_count",
-                        lambda self: next(counts, 3))
-    monkeypatch.setattr(pvz_executor.PvZExecutor, "_mem_read_valid_seeds",
-                        lambda self: [(1, 3)])
-    monkeypatch.setattr(pvz_executor.time, "sleep", lambda s: None)
-    state = SimpleNamespace(game_mode=2, adventure_level=-1, seeds=[_seed(3)])
+    state = SimpleNamespace(game_mode=35, adventure_level=-1, seeds=[_seed(33)], sun=50)
 
-    result: dict = {"action": "collect_belt"}
-    ex._collect_belt({"count": 1}, state, result)
+    with pytest.raises(ValueError, match="已禁用"):
+        ex._collect_belt({"count": 3}, state, {"action": "collect_belt"})
+    ex._injector.mouse_click.assert_not_called()
 
-    assert "坚果" in result["detail"]        # 按植物类型取名（槽 1 旧 bug 会报"向日葵"）
-    assert "向日葵" not in result["detail"]
+
+def test_collect_belt_refused_on_non_belt(monkeypatch) -> None:
+    """普通关：collect_belt 拒绝并给出正确出路（不误点卡片栏）。"""
+    ex = _bare_executor(planting_mode="putplant")
+    monkeypatch.setattr(pvz_executor.PvZExecutor, "_conveyor_verdict", lambda self, s: False)
+    state = SimpleNamespace(game_mode=2, adventure_level=-1, seeds=[_seed(3)], sun=100)
+
+    with pytest.raises(ValueError, match="不是传送带关"):
+        ex._collect_belt({"count": 3}, state, {"action": "collect_belt"})
+    ex._injector.mouse_click.assert_not_called()
 
 
 def test_format_state_bowling_empty_bar_without_collect_hint(monkeypatch) -> None:
@@ -304,8 +404,45 @@ def test_format_state_bowling_empty_bar_without_collect_hint(monkeypatch) -> Non
     assert "全部空槽时本轮 wait" in text
 
 
-def test_format_state_minigame_belt_keeps_collect_hint(monkeypatch) -> None:
-    """非冒险传送带（小游戏类）：保留 collect_belt 引导（回归）。"""
+def test_format_state_boss_belt_shows_sun_charged(monkeypatch) -> None:
+    """僵王类传送带（mode=35）：显示真实阳光与扣费语义，无"不计阳光"、无 collect_belt。"""
+    from pvz_memory.reader import PvZStateReader
+
+    class _StubMem:
+        offsets = PvZOffsets()
+        main_object = 0x1000
+
+        def read_int(self, addr: int) -> int:
+            return 0
+
+        def read_bool(self, addr: int) -> bool:
+            return False
+
+        def read_pointer(self, addr: int) -> int:
+            return 0
+
+    r = PvZStateReader.__new__(PvZStateReader)
+    r._mem = _StubMem()
+    r._guide_dir = None
+    state = SimpleNamespace(
+        game_clock=100, wave=1, total_wave=8, refresh_countdown=0,
+        huge_wave_countdown=0, level_end_countdown=0, scene_name="白天",
+        sun=125, seeds=[], plants=[], zombies=[], lawn_mowers=[],
+        game_mode=35, adventure_level=-1, game_ui=3, in_battle=True, is_paused=False,
+        scene=0, items=[], grid_items=[], _plantable_rows=None,
+    )
+    text = r.format_state(state)
+    assert "传送带" in text
+    assert "自动补卡" in text
+    assert "阳光正常计费" in text
+    assert "☀ 阳光: 125" in text
+    assert "不计阳光" not in text
+    assert "立刻用 collect_belt 收取" not in text   # 不引导收取（collect_belt 已禁用）
+    assert "全部空槽时本轮 wait" in text
+
+
+def test_format_state_bowling_minigame_belt_no_sun(monkeypatch) -> None:
+    """小游戏坚果保龄球（mode=17）：无阳光传送带文案（不计阳光 + 自动补卡）。"""
     from pvz_memory.reader import PvZStateReader
 
     class _StubMem:
@@ -328,7 +465,10 @@ def test_format_state_minigame_belt_keeps_collect_hint(monkeypatch) -> None:
         game_clock=100, wave=1, total_wave=8, refresh_countdown=0,
         huge_wave_countdown=0, level_end_countdown=0, scene_name="白天",
         sun=0, seeds=[], plants=[], zombies=[], lawn_mowers=[],
-        game_mode=2, adventure_level=-1, game_ui=3, in_battle=True, is_paused=False, scene=0, items=[], grid_items=[], _plantable_rows=None, _is_conveyor=True,
+        game_mode=17, adventure_level=-1, game_ui=3, in_battle=True, is_paused=False,
+        scene=0, items=[], grid_items=[], _plantable_rows=None,
     )
     text = r.format_state(state)
-    assert "立刻用 collect_belt 收取" in text
+    assert "不计阳光" in text
+    assert "自动补卡" in text
+    assert "立刻用 collect_belt 收取" not in text   # 不引导收取（collect_belt 已禁用）
