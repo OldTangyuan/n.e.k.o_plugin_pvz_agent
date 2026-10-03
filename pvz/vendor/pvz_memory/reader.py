@@ -51,17 +51,19 @@ def level_is_conveyor(state: Any) -> bool:
     """传送带关单次观测判定：卡槽全空 且 game_mode 非冒险/未知。
 
     - game_mode 0 = 冒险模式（教程关/普通冒险关，绝不能按传送带处理——4.0 教训）；
-    - **例外：1-5 坚果保龄球**——冒险模式内的传送带关（0.4.3 实测：mode=0、
-      Board+0x5550 读 5、无阳光机制、卡槽被传送带喂满坚果）。不看卡槽直接
-      判传送带，否则普通关路径会给用过的坚果开 30s 冷却、占着卡槽不消失；
+    - **例外：冒险模式内的传送带关（坚果保龄球系列）**——0.4.3 实测 1-5：
+      mode=0、Board+0x5550 读 5、无阳光机制、卡槽被传送带喂满坚果。不看
+      卡槽直接判传送带，否则普通关路径会给用过的坚果开 30s 冷却、占着
+      卡槽不消失。0.4.6 扩展 35=4-5 坚果保龄球2（关卡号=(章-1)*10+关，
+      1-5→5 已实机证实；4-5 同机制未实机验证，异常时看日志 adventure_level）；
     - game_mode -1 = 读取失败（保守按普通关处理）；
     - 其余模式 + 卡槽全空 = 传送带关。
-    卡槽非空恒 False（上面的 1-5 例外除外）。粘性（首战斗观测决定整关）由
-    调用方维护——传送带关收取后卡槽也有卡，单次观测会误判。
+    卡槽非空恒 False（上面的冒险传送带例外除外）。粘性（首战斗观测决定
+    整关）由调用方维护——传送带关收取后卡槽也有卡，单次观测会误判。
     """
     try:
         mode = _as_int(getattr(state, "game_mode", -1))
-        if mode == 0 and _as_int(getattr(state, "adventure_level", -1)) == 5:
+        if mode == 0 and _as_int(getattr(state, "adventure_level", -1)) in (5, 35):
             return True
         for s in (getattr(state, "seeds", []) or []):
             if _as_int(getattr(s, "plant_type", -1)) >= 0:
@@ -890,9 +892,21 @@ class PvZStateReader:
         # ---- 基础信息 ----
         # 传送带判定由 read_state 逐轮纯推导并盖章；这里只读本轮结论。
         belt = getattr(state, "_is_conveyor", None) is True
+        try:
+            adventure_belt = belt and _as_int(getattr(state, "game_mode", -1)) == 0
+        except Exception:
+            adventure_belt = False
         if belt:
             lines.append("🏷 关卡类型: 传送带关——植物由传送带供给，**不计阳光**（阳光数字无视）")
-            lines.append("☀ 阳光: 不适用（传送带关没有阳光机制，卡可用就直接种，绝不要 wait）")
+            if adventure_belt:
+                # 冒险模式传送带关（坚果保龄球类）：空槽由传送带自动补卡，
+                # 全空槽时唯一正确的动作就是等待补卡——"绝不 wait"只适用于
+                # 有收取队列的传送带关。
+                lines.append(
+                    "☀ 阳光: 不适用（卡可用就直接种；全部空槽时本轮 wait 等待传送带补卡）"
+                )
+            else:
+                lines.append("☀ 阳光: 不适用（传送带关没有阳光机制，卡可用就直接种，绝不要 wait）")
         else:
             lines.append(f"☀ 阳光: {state.sun}")
         # 游戏时钟（厘秒 → mm:ss），帮助模型判断节奏
@@ -947,12 +961,25 @@ class PvZStateReader:
                 )
         else:
             if self.conveyor_verdict(state):
-                lines.append("  (空——传送带关卡)")
-                lines.append(
-                    "  👉 传送带关卡：**禁止 wait 干等阳光**——立刻用 collect_belt 收取传送带植物"
-                    "（可连续收多张），收到后同一轮 place_plant 种下；收进的卡显示☀不足也照样种"
-                    "（以游戏实际为准）"
-                )
+                if adventure_belt:
+                    # 冒险模式传送带关（坚果保龄球类）：传送带自动向卡栏补卡，
+                    # 没有"待收取队列"。0.4.6 实测 collect_belt 的扫描点与卡栏
+                    # 重叠，点击只会误拾栏内卡——executor 已直接禁用，文本同步
+                    # 不再引导模型调用（此前它会照旧反复 collect_belt）。
+                    lines.append(
+                        "  (空——传送带会自动补卡，无需收取)"
+                    )
+                    lines.append(
+                        "  👉 传送带关：空槽由传送带自动补卡（collect_belt 已禁用且不必要）——"
+                        "先种卡栏已有的卡；全部空槽时本轮 wait 等待补卡后重读"
+                    )
+                else:
+                    lines.append("  (空——传送带关卡)")
+                    lines.append(
+                        "  👉 传送带关卡：**禁止 wait 干等阳光**——立刻用 collect_belt 收取传送带植物"
+                        "（可连续收多张），收到后同一轮 place_plant 种下；收进的卡显示☀不足也照样种"
+                        "（以游戏实际为准）"
+                    )
             else:
                 lines.append(
                     "  (空——等待游戏发卡或教程关自动给卡；这不是传送带关，不要 collect_belt，"

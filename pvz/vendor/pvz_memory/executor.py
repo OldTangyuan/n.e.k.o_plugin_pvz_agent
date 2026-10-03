@@ -496,7 +496,8 @@ class PvZExecutor:
         # （日志实证：模型对空槽发起种植，注入层报成功但什么都没发生）
         if seed.plant_type < 0:
             raise ValueError(
-                f"卡片 [{card_index}] 是空槽位（传送带尚未送来或已用完）——改用 collect_belt 收取新植物"
+                f"卡片 [{card_index}] 是空槽位（传送带尚未送来或已用完）——"
+                "先种其他卡；若全部空槽，本轮 wait 等待传送带补卡后重读"
             )
         # 就绪判定只看冷却——is_usable(0x48) 语义模糊（读取器注释同理），
         # 传送带关卡收进的卡该标志常为 False，按它拦会造成"显示✅却种不下"。
@@ -900,6 +901,21 @@ class PvZExecutor:
                 "本关不是传送带关（有固定卡组或模式未知）——卡槽里的卡直接 place_plant 种下，"
                 "不要 collect_belt（会误点卡片栏）"
             )
+        try:
+            _mode = int(getattr(state, "game_mode", -1))
+        except (TypeError, ValueError):
+            _mode = -1
+        if _mode == 0:
+            # 冒险模式传送带关（坚果保龄球类，0.4.6）：传送带自动向卡栏补卡，
+            # 没有"待收取队列"。扫描点与卡片栏区域重叠（_BELT_CLICK_POINTS），
+            # 点击只会误拾栏内卡（实测日志：扫描点(170,74)误拾卡片栏卡）；
+            # 计数上涨还会把传送带自动补卡误记成点击功劳（假阳性）。
+            # 直接禁用，给模型明确出路。
+            raise ValueError(
+                "本关传送带会自动把新卡填进卡栏（坚果保龄球类），无需也不可收取——"
+                "collect_belt 在本关已禁用。直接 place_plant 卡栏已有的卡；"
+                "全部空槽时本轮 wait 等待传送带补卡后重读"
+            )
         if not self._injector:
             raise PvZMemoryError("collect_belt 需要代码注入器（当前为鼠标 fallback 模式）")
 
@@ -944,10 +960,13 @@ class PvZExecutor:
             if not gained:
                 break  # 一整轮没收到 → 队列空或卡栏满，停
             gained_rounds += 1
-            # 读卡栏最后一张的名字（给模型即时反馈；读失败不影响计数）
+            # 读卡栏最后一张的类型（给模型即时反馈；读失败不影响计数）。
+            # 0.4.6 修复：_mem_read_valid_seeds 返回 (槽位序号, 植物类型)，
+            # 此前误取 [0]（槽位序号）按植物类型取名——1-5 里新卡落在槽 1
+            # 就报"收到 向日葵"（其实是坚果）。
             fresh = self._mem_read_valid_seeds()
             if fresh:
-                collected.append(fresh[-1][0])
+                collected.append(fresh[-1][1])
             time.sleep(0.3)
 
         # 扫描结束必做：最后一次点击可能把栏内卡拾上了鼠标（拾取时栏数量
