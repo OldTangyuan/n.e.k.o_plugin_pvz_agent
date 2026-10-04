@@ -507,10 +507,29 @@ class PvZExecutor:
                 "先种其他卡；若全部空槽，本轮 wait 等待传送带补卡后重读"
             )
         if conveyor:
-            # 传送带关统一语义（0.4.9 用户决策）：免阳光、无冷却、零提示。
-            # 跳过冷却与阳光两个闸门——不拦截、不警告（任何"阳光不足/
-            # 冷却中"字样都会误导模型干等），种植按 0 费用直注（见下方）。
-            pass
+            # 0.4.12：实时复核卡槽。state.seeds 是轮首快照；同轮连续种植会把
+            # 卡消耗掉（sc_type→-1）而快照不更新——不复核就会"预支"传送带
+            # 还没送到的植物（僵王关实测：模型照快照重复引用已消耗的卡）。
+            live_type = self._read_card_live_type(seed.index)
+            if live_type == -2:
+                raise ValueError(
+                    f"无法实时读取卡片 [{seed.index}] 的当前状态——传送带关必须确认"
+                    "卡片已送达才能种（防止种出传送带还没送到的植物）；"
+                    "请下一轮重读状态后重试"
+                )
+            if live_type < 0:
+                raise ValueError(
+                    f"卡片 [{seed.index}] {seed.name} 刚被用掉（或传送带还没送到）——"
+                    "不能重复种；请改种其它 ✅ 卡，全空就 wait 等待送卡后重读"
+                )
+            if live_type != seed.plant_type:
+                live_name = PLANT_NAMES.get(live_type, f"未知({live_type})")
+                raise ValueError(
+                    f"卡片 [{seed.index}] 已被传送带刷新，现在是 {live_name}（不再是 "
+                    f"{seed.name}）——请按最新卡片列表重新选择"
+                )
+            # 免阳光、无冷却、零提示（0.4.9 用户决策）：跳过冷却与阳光闸门，
+            # 不拦截不警告，种植按 0 费用直注（见下方）。
         else:
             # 就绪判定只看冷却——is_usable(0x48) 语义模糊（读取器注释同理）。
             # 0x24 是"已冷却时长"（从 0 递增到 0x28 总时长），cd>0 即在冷却；
@@ -880,6 +899,31 @@ class PvZExecutor:
             logger.info("[PvZ执行] ☀ 阳光补至 %s（落格被拒的解卡处理）", target)
         except Exception as exc:
             logger.warning("[PvZ执行] 补阳光失败: %s", exc)
+
+    def _read_card_live_type(self, card_index: int) -> int:
+        """读内存取卡槽**当前**的植物类型（0.4.12）.
+
+        返回：>=0 = 卡槽当前真实类型；-1 = 确认空槽/已消耗；
+        -2 = 读失败/越界（状态无法确认）。
+
+        place_plant 拿到的 state 是轮首快照；传送带关同轮连续种植会消耗
+        卡槽（sc_type 置 -1），快照里却仍是旧类型。传送带种植前必须实时
+        复核，否则模型会"预支"传送带还没送到的植物。
+        """
+        try:
+            off = self._mem.offsets
+            mo = self._mem.main_object
+            seed_array = self._mem.read_pointer(mo + off.seed_array)
+            if not seed_array:
+                return -2
+            count = self._mem.read_int(seed_array + off.seed_count)
+            if card_index < 0 or card_index >= min(max(count, 0), 12):
+                return -2
+            card_addr = (seed_array + off.seed_card_offset
+                         + card_index * off.seed_card_size)
+            return self._mem.read_int(card_addr + off.sc_type)
+        except Exception:
+            return -2
 
     def _cell_occupied(self, row: int, col: int) -> bool:
         """读内存判断格子上是否有植物（读取失败按 False 处理）。

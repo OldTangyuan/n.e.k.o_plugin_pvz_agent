@@ -180,7 +180,9 @@ def test_conveyor_putplant_consumes_card(monkeypatch) -> None:
     monkeypatch.setattr(pvz_executor.PvZExecutor, "_conveyor_verdict", lambda self, s: True)
     monkeypatch.setattr(pvz_executor.PvZExecutor, "_cell_has_plant_type", lambda self, r, c, t: True)
     monkeypatch.setattr(pvz_executor.time, "sleep", lambda s: None)
-    ex._mem.read_int.return_value = -1  # 消耗回读: sc_type = -1
+    # 0.4.12 实时复核：count 与卡槽类型都读 3（与卡[0] 的坚果一致 → 放行）；
+    # 消耗回读读到 3 只影响日志，clear_seed_card 照常断言
+    ex._mem.read_int.return_value = 3
 
     result: dict = {"action": "place_plant", "status": "ok"}
     ex._place_plant({"card_index": 0, "row": 1, "col": 2}, _bowling_state(), result)
@@ -199,7 +201,7 @@ def test_conveyor_putplant_explosive_nut_passes_guard(monkeypatch) -> None:
     monkeypatch.setattr(pvz_executor.PvZExecutor, "_conveyor_verdict", lambda self, s: True)
     monkeypatch.setattr(pvz_executor.PvZExecutor, "_cell_has_plant_type", lambda self, r, c, t: True)
     monkeypatch.setattr(pvz_executor.time, "sleep", lambda s: None)
-    ex._mem.read_int.return_value = -1
+    ex._mem.read_int.return_value = 49  # 实时复核放行：卡[1] 当前 = 爆炸坚果(49)
 
     result: dict = {"action": "place_plant", "status": "ok"}
     ex._place_plant({"card_index": 1, "row": 1, "col": 2}, _bowling_state(), result)
@@ -209,19 +211,23 @@ def test_conveyor_putplant_explosive_nut_passes_guard(monkeypatch) -> None:
     ex._injector.clear_seed_card.assert_called_once_with(card_addr)
 
 
-def test_conveyor_consume_survives_seed_array_unavailable(monkeypatch) -> None:
-    """卡槽数组读不到：消耗跳过（只记日志），种植结果不受影响。"""
+def test_conveyor_rejects_when_seed_array_unavailable(monkeypatch) -> None:
+    """卡槽数组读不到（-2 无法确认）：传送带关拒种——宁可拦下也不凭空直注。
+
+    0.4.12 语义变更：旧版放行+跳过消耗；新版实时复核失败即拒绝，
+    防止"预支"传送带还没送到的植物（用户实测僵王关种出未交付的卡）。
+    """
     ex = _bare_executor(planting_mode="putplant", supports_mouse=False)
     ex._mem.read_pointer.return_value = 0
     monkeypatch.setattr(pvz_executor.PvZExecutor, "_conveyor_verdict", lambda self, s: True)
     monkeypatch.setattr(pvz_executor.PvZExecutor, "_cell_has_plant_type", lambda self, r, c, t: True)
     monkeypatch.setattr(pvz_executor.time, "sleep", lambda s: None)
 
-    result: dict = {"action": "place_plant", "status": "ok"}
-    ex._place_plant({"card_index": 0, "row": 1, "col": 2}, _bowling_state(), result)
-
+    with pytest.raises(ValueError, match="无法实时读取"):
+        ex._place_plant({"card_index": 0, "row": 1, "col": 2}, _bowling_state(),
+                        {"action": "place_plant"})
     ex._injector.clear_seed_card.assert_not_called()
-    ex._injector.put_plant.assert_called_once()
+    ex._injector.put_plant.assert_not_called()
 
 
 def test_conveyor_consume_even_when_nut_rolled_away(monkeypatch) -> None:
@@ -230,7 +236,7 @@ def test_conveyor_consume_even_when_nut_rolled_away(monkeypatch) -> None:
     monkeypatch.setattr(pvz_executor.PvZExecutor, "_conveyor_verdict", lambda self, s: True)
     monkeypatch.setattr(pvz_executor.PvZExecutor, "_cell_has_plant_type", lambda self, r, c, t: False)
     monkeypatch.setattr(pvz_executor.time, "sleep", lambda s: None)
-    ex._mem.read_int.return_value = -1
+    ex._mem.read_int.return_value = 3  # 实时复核放行：卡槽当前 = 坚果(3)
 
     result: dict = {"action": "place_plant", "status": "ok"}
     ex._place_plant({"card_index": 0, "row": 1, "col": 2}, _bowling_state(), result)
@@ -274,7 +280,7 @@ def test_boss_belt_plants_free_even_with_zero_sun(monkeypatch) -> None:
     monkeypatch.setattr(pvz_executor.PvZExecutor, "_conveyor_verdict", lambda self, s: True)
     monkeypatch.setattr(pvz_executor.PvZExecutor, "_cell_has_plant_type", lambda self, r, c, t: True)
     monkeypatch.setattr(pvz_executor.time, "sleep", lambda s: None)
-    ex._mem.read_int.return_value = -1
+    ex._mem.read_int.return_value = 32  # 实时复核放行：卡槽当前 = 卷心菜(32)
 
     state = SimpleNamespace(
         seeds=[SeedInfo(index=0, plant_type=32, name="卷心菜投手", sun_cost=100,
@@ -301,7 +307,7 @@ def test_boss_belt_ignores_stale_cooldown(monkeypatch) -> None:
     monkeypatch.setattr(pvz_executor.PvZExecutor, "_conveyor_verdict", lambda self, s: True)
     monkeypatch.setattr(pvz_executor.PvZExecutor, "_cell_has_plant_type", lambda self, r, c, t: True)
     monkeypatch.setattr(pvz_executor.time, "sleep", lambda s: None)
-    ex._mem.read_int.return_value = -1
+    ex._mem.read_int.return_value = 33  # 实时复核放行：卡槽当前 = 花盆(33)
 
     state = SimpleNamespace(
         seeds=[SeedInfo(index=0, plant_type=33, name="花盆", sun_cost=25,

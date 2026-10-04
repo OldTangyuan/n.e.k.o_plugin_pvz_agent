@@ -31,6 +31,8 @@ from .offsets import (
     ITEM_NAMES,
     PLACE_ITEM_NAMES,
     PLANT_NAMES,
+    PLANT_POT_TYPES,
+    PLANT_PUMPKIN_TYPE,
     PLANT_SUN_COST,
     ZOMBIE_NAMES,
     GameUI,
@@ -986,6 +988,16 @@ class PvZStateReader:
                 lines.append(
                     f"  [{s.index}] {s.name} ({s.sun_cost}☀) {status}"
                 )
+            if belt:
+                # 0.4.12：把空槽也点明——模型曾经引用"快照里有效、实际已消耗"
+                # 的卡序号去"预支"传送带还没送到的植物。列出空槽序号让它
+                # 无歧义地知道哪些 index 能种。
+                empty_idx = [str(s.index) for s in state.seeds if s.plant_type < 0]
+                if empty_idx:
+                    lines.append(
+                        f"  (空槽 [{' ,'.join(empty_idx)}]：传送带还没把卡送到这些格——"
+                        "不能种；只种上面对应 ✅ 的卡)"
+                    )
         else:
             if self.conveyor_verdict(state):
                 # 所有传送带关的卡栏都由传送带**自动喂卡**（1-5/4-5 坚果保龄球、
@@ -1051,6 +1063,21 @@ class PvZStateReader:
                         tags += " ✅"
                     elif p.state == 38:
                         tags += " 发"
+                    # 基座/外壳可种性标注（0.4.12）：屋顶空花盆、水池空荷叶是
+                    # 唯一种植点——明示"可种"并把已占用的标出来，防止模型
+                    # 绕开空基座或往已种过的基座里硬塞。
+                    if p.plant_type in PLANT_POT_TYPES or p.plant_type == PLANT_PUMPKIN_TYPE:
+                        inner = [q for q in state.plants
+                                 if q.row == p.row and q.col == p.col
+                                 and q.plant_type not in PLANT_POT_TYPES
+                                 and q.plant_type != PLANT_PUMPKIN_TYPE]
+                        if p.plant_type == PLANT_PUMPKIN_TYPE:
+                            if not inner:
+                                tags += "(空南瓜——可往里种)"
+                        elif inner:
+                            tags += f"(基座里已种{'、'.join(q.name for q in inner)}，满)"
+                        else:
+                            tags += "(空基座——优先往这里种)"
                     parts.append(f"({p.col}){p.name}{tags}")
                 lines.append(f"  行{row}: {', '.join(parts)}")
         else:
