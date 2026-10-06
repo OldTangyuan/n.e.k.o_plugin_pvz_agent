@@ -17,9 +17,4 @@ for _candidate in (_HERE.parent, _HERE.parent.parent):
         for _p in (str(_pvz_dir), str(_pvz_dir / "vendor")):
             if _p not in sys.path:
                 sys.path.insert(0, _p)
-        # 内置 openai 副本（pvz_agent.vlm 依赖 `from openai import OpenAI`）：
-        # 运行时由 service.py 挂载；测试同样挂上，省得每个测试文件自己插路径
-        _oai_dir = _pvz_dir / "vendor" / "openai_stack"
-        if _oai_dir.is_dir() and str(_oai_dir) not in sys.path:
-            sys.path.insert(0, str(_oai_dir))
         break

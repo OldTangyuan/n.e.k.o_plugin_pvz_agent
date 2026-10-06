@@ -14,8 +14,10 @@ temperature）并立即重试，降级不消耗重试次数。
 
 from __future__ import annotations
 
+import importlib.util
 import sys
 import unittest.mock as mock
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -25,6 +27,13 @@ if sys.platform != "win32":
         "PvZ Agent 插件测试依赖 Windows 运行时（executor 模块 import ctypes.wintypes）",
         allow_module_level=True,
     )
+
+if importlib.util.find_spec("openai") is None:
+    # 运行时由 service.py 把内置副本 pvz/vendor/openai_stack 挂进 sys.path；
+    # 仅在环境没有 openai 时（Windows 直跑 pytest）挂载 vendored 副本。
+    # 绝不能无条件插——Linux CI 上会遮蔽环境正常的 openai（vendored
+    # pydantic_core 是 Windows 编译的 .pyd，加载必炸）。
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "pvz" / "vendor" / "openai_stack"))
 
 from pvz_agent.config import VLMConfig  # noqa: E402
 from pvz_agent.vlm import THINKING_EXTRA_BODY_PRESETS, VLMClient  # noqa: E402
