@@ -105,9 +105,16 @@ class Planner:
                     mime=self._mime,
                     include_image=self._include_image,
                 )
-            except Exception:
-                # 原生工具不可用（provider 不支持 tools 等）→ 永久回退文本模式
-                self._use_legacy_prompt()
+            except Exception as exc:
+                # 仅当服务端明确拒绝 tools/tool_choice 参数（provider 能力缺陷）
+                # 才永久回退文本模式；网络/密钥/超时等瞬时错误原样上抛——
+                # 上层会重试，恢复后仍走原生 fc。0.4.17 修复：此前任何异常
+                # 都被当成"provider 不支持 tools"永久降级——游玩中把配置改坏
+                # 再改回，planner 卡死在 legacy 模式，模型持续 wait 不动作。
+                if self._is_tools_rejection(exc):
+                    self._use_legacy_prompt()
+                else:
+                    raise
             else:
                 if calls_raw:
                     calls = [ToolCall(name=item["name"], arguments=item["arguments"]) for item in calls_raw]
@@ -173,6 +180,32 @@ class Planner:
         if self._history and self._system_prompt_xml:
             self._history[0]["content"] = self._system_prompt_xml
         self._legacy_prompt_used = True
+
+    # 服务端"不支持 tools/tool_choice"的报错特征（0.4.17）：命中才允许永久
+    # 降级 legacy——瞬时错误（网络/密钥/超时/限流）的报错文本不含这些词。
+    _TOOLS_REJECT_MARKERS = (
+        "tool_choice", "tools", "function calling", "function_calling",
+        "函数调用", "工具调用", "工具",
+    )
+
+    @classmethod
+    def _is_tools_rejection(cls, exc: BaseException) -> bool:
+        """判断异常是否为 provider 拒绝 tools 参数（能力缺陷）而非瞬时故障。"""
+        text = str(exc).lower()
+        return any(marker in text for marker in cls._TOOLS_REJECT_MARKERS)
+
+    def restore_native_tools(self) -> None:
+        """把 legacy 文本回退状态还原为原生 fc（幂等）。
+
+        0.4.17：配置热替换（reconfigure 换 VLM 客户端）时调用——端点/密钥
+        可能已恢复或更换，给原生工具一次重新协商的机会；若 provider 真不
+        支持，下一轮 tools 被拒会再次自动降级（双向自愈）。
+        """
+        if not self._legacy_prompt_used:
+            return
+        self._legacy_prompt_used = False
+        if self._history and self._system_prompt:
+            self._history[0]["content"] = self._system_prompt
 
     def _trim(self) -> None:
         """保留 system + 最近 max_rounds 轮（一轮 ≈ user+assistant+反馈 3 条消息）。"""

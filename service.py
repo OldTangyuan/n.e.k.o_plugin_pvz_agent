@@ -473,6 +473,13 @@ class PvZAgentService:
             try:
                 if self._planner is not None:
                     self._planner.vlm = new_vlm  # 游玩中热替换，历史保留
+                    # 配置已更换（0.4.17）：重置 legacy 降级，重新协商原生
+                    # 工具——错误期间 planner 可能因瞬时故障被永久降到
+                    # legacy 文本模式（症状：恢复后模型持续 wait）；若端点
+                    # 真不支持 fc，下一轮 tools 被拒会再次自动降级。
+                    restore = getattr(self._planner, "restore_native_tools", None)
+                    if callable(restore):
+                        restore()
             except Exception:
                 pass
             detail = "VLM 客户端已热替换（当前这轮用旧配置跑完，下一轮生效）"
