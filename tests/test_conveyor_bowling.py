@@ -11,11 +11,12 @@
 - GameMode（PvzBase+0x7F8）∈ {17, 33, 35}：坚果保龄球1/2、僵王博士的小游戏
   （来源：PvZ 反编译 enum GameMode；锚点验证：僵王关实机读数 35 =
   GAMEMODE_CHALLENGE_FINAL_BOSS）；
-- game_mode=0 且 adventure_level（Board+0x5550）∈ {5, 10, 20, 30, 40, 50}：
+- game_mode=0 且 adventure_level（Board+0x5550）∈ {5, 10, 15, 20, 25, 30, 40, 45, 50}：
   1-5 保龄球 + **每个大关的第 10 关**（0.4.14 用户规则：冒险共 5 大关，
-  各大关第 10 关全是传送带——1-10 实测曾被误判普通关）。
-  旧条目 35（4-5）为纯推断、与用户规则矛盾，0.4.14 移除——普通关误判成
-  传送带会免阳光，危害远大于漏判。
+  各大关第 10 关全是传送带——1-10 实测曾被误判普通关）+ 2-5/3-5/5-5
+  （0.4.15 用户补充）。
+  旧条目 35（4-5）为纯推断、用户枚举未列入——保持普通关（误判成传送带
+  会免阳光，危害远大于漏判）。
 旧"卡槽全空"瞬态启发式删除：传送带开局几十秒卡栏就被喂满，僵王关全程
 被误判普通关的根因。
 
@@ -72,10 +73,11 @@ def test_bowling_is_conveyor_even_with_full_seed_bar() -> None:
 
 
 def test_bowling_exception_requires_level_5() -> None:
-    """其他冒险关（adventure_level 不在保龄球集合）不例外：卡槽非空仍判普通关。"""
+    """其他冒险关（adventure_level 不在白名单）不例外：卡槽非空仍判普通关。"""
     state = SimpleNamespace(game_mode=0, adventure_level=4, seeds=[_seed(3)])
     assert level_is_conveyor(state) is False
-    state = SimpleNamespace(game_mode=0, adventure_level=15, seeds=[])
+    # 15（2-5）0.4.15 起是传送带；改用真普通关 16（1-6）做反例
+    state = SimpleNamespace(game_mode=0, adventure_level=16, seeds=[])
     assert level_is_conveyor(state) is False
 
 
@@ -89,11 +91,18 @@ def test_world_tenth_levels_are_conveyor() -> None:
         assert level_is_conveyor(state) is True, f"1..5 大关第 10 关 level={level} 应判传送带"
 
 
-def test_inferred_4_5_is_not_conveyor() -> None:
-    """4-5（adventure_level=35）：旧版纯推断的传送带条目已按用户规则移除。
+def test_world_fifth_levels_are_conveyor() -> None:
+    """0.4.15 用户补充：2-5/3-5/5-5（15/25/45）也是传送带关（1-5=5 早有）。"""
+    for level in (5, 15, 25, 45):
+        state = SimpleNamespace(game_mode=0, adventure_level=level, seeds=[_seed(3)])
+        assert level_is_conveyor(state) is True, f"第 5 关 level={level} 应判传送带"
 
-    用户规则：只有各大关第 10 关是传送带；把普通关误判成传送带会免阳光，
-    危害远大于漏判，故 35 从白名单删除。
+
+def test_inferred_4_5_is_not_conveyor() -> None:
+    """4-5（adventure_level=35）：旧版纯推断的传送带条目已移除（0.4.15 确认）。
+
+    0.4.15 用户枚举传送带关：各大关第 10 关 + 1-5/2-5/3-5/5-5——4-5 不在
+    列表。把普通关误判成传送带会免阳光，危害远大于漏判，故 35 不在白名单。
     """
     state = SimpleNamespace(game_mode=0, adventure_level=35, seeds=[_seed(3)])
     assert level_is_conveyor(state) is False
