@@ -37,12 +37,14 @@ THINKING_EXTRA_BODY_PRESETS: dict[str, dict[str, Any]] = {
     "claude": {"thinking": {"type": "disabled"}},
     "claude_thinking": {"thinking": {"type": "enabled"}},
     # Gemini 2.5：budget 0 = 关；800 = 低固定预算（开思考但不深思）
-    "gemini": {"extra_body": {"google": {"thinking_config": {"thinking_budget": 0}}}},
-    "gemini_thinking": {"extra_body": {"google": {"thinking_config": {"thinking_budget": 800}}}},
+    # （注意：预设本身不含 extra_body 包装——_request_kwargs 统一加，
+    #   0.4.12 前这里多包一层导致请求出现嵌套 extra_body，Gemini 端点直接 400）
+    "gemini": {"google": {"thinking_config": {"thinking_budget": 0}}},
+    "gemini_thinking": {"google": {"thinking_config": {"thinking_budget": 800}}},
     # Gemini 3：思考档位保持最低(low)，include_thoughts 控制思考过程是否透出
     # （thoughts 走独立字段，不混进 content）
-    "gemini_3": {"extra_body": {"google": {"thinking_config": {"thinking_level": "low", "include_thoughts": False}}}},
-    "gemini_3_thinking": {"extra_body": {"google": {"thinking_config": {"thinking_level": "low", "include_thoughts": True}}}},
+    "gemini_3": {"google": {"thinking_config": {"thinking_level": "low", "include_thoughts": False}}},
+    "gemini_3_thinking": {"google": {"thinking_config": {"thinking_level": "low", "include_thoughts": True}}},
     # OpenRouter：effort none→low（开思考但取最低努力档）
     "openrouter": {"reasoning": {"effort": "none"}},
     "openrouter_thinking": {"reasoning": {"effort": "low"}},
@@ -96,6 +98,55 @@ class VLMClient:
         return kw
 
     # ------------------------------------------------------------------ #
+    #  参数被服务端拒绝时的自动降级（0.4.13）
+    # ------------------------------------------------------------------ #
+    # 各家端点对思维链/采样参数的支持差异很大：DS 的 thinking.type、qwen 的
+    # enable_thinking 发给真 OpenAI 会 400 "Unrecognized request argument"；
+    # OpenAI 推理模型又反过来拒收 max_tokens/自定义 temperature。预设立得
+    # 再准也架不住选错——错误文本命中"我们发出的参数名 + 拒绝措辞"就撤掉
+    # 对应参数立即重试，比整轮对话失败好得多。
+    _REJECT_WORDS: tuple[str, ...] = (
+        "unrecognized", "unknown", "unexpected", "invalid",
+        "not supported", "unsupported", "does not support",
+        "不支持", "无法识别", "无效",
+    )
+
+    @classmethod
+    def _degrade_kwargs(cls, kw: dict, exc: Exception) -> bool:
+        """按报错文本降级请求参数（原地改 kw）。命中返回 True（应立即重试）。
+
+        降级顺序：思考参数（extra_body 整体撤掉）→ max_tokens 换
+        max_completion_tokens → 去掉自定义 temperature。每次调用最多降一级，
+        逐次收敛到服务端接受的形态。
+        """
+        text = str(exc).lower()
+
+        def rejected(param: str) -> bool:
+            return param in text and any(w in text for w in cls._REJECT_WORDS)
+
+        if "extra_body" in kw:
+            body = kw["extra_body"] or {}
+            hit = [k for k in body if rejected(str(k).lower())]
+            nested = any(w in text for w in ("thinking_config", "google", "extra_body"))
+            if hit or nested:
+                kw.pop("extra_body")
+                print(
+                    f"[VLM] 思考参数被当前 API 拒绝（{hit or '嵌套/未知字段'}）——"
+                    "本次起不再发送思维链参数重试。提示：真 OpenAI 用 openai_native* "
+                    "预设，qwen/silicon 兼容端点用 openai*，DeepSeek/Kimi 用 disabled/enabled"
+                )
+                return True
+        if "max_tokens" in kw and rejected("max_tokens"):
+            kw["max_completion_tokens"] = kw.pop("max_tokens")
+            print("[VLM] max_tokens 被该模型拒绝——已自动改用 max_completion_tokens 重试")
+            return True
+        if "temperature" in kw and rejected("temperature"):
+            kw.pop("temperature")
+            print("[VLM] temperature 被该模型拒绝（推理模型常只接受默认温度）——已去掉重试")
+            return True
+        return False
+
+    # ------------------------------------------------------------------ #
     #  主入口
     # ------------------------------------------------------------------ #
     def chat_with_image(
@@ -124,14 +175,18 @@ class VLMClient:
         messages = self._build_messages(img_b64, history, user_text, include_image, mime)
 
         last_exc: Exception | None = None
-        for attempt in range(1, self.cfg.retries + 1):
+        # 请求参数集中进 kw（0.4.13）：思考参数与 max_tokens/temperature 都可被
+        # _degrade_kwargs 按服务端报错原地降级（预设与 provider 不匹配不再整轮失败）。
+        kw = self._request_kwargs()
+        kw["max_tokens"] = self.cfg.max_output_tokens
+        kw["temperature"] = self.cfg.temperature
+        attempt = 0
+        while attempt < self.cfg.retries:
             try:
                 resp = self._client.chat.completions.create(
                     model=self.cfg.model,
                     messages=messages,
-                    max_tokens=self.cfg.max_output_tokens,
-                    temperature=self.cfg.temperature,
-                    **self._request_kwargs(),
+                    **kw,
                 )
                 usage = getattr(resp, "usage", None)
                 if usage is not None and usage.prompt_tokens:
@@ -146,6 +201,9 @@ class VLMClient:
 
             except Exception as exc:
                 last_exc = exc
+                if self._degrade_kwargs(kw, exc):
+                    continue    # 参数已降级：立即重试，不计入重试次数
+                attempt += 1
                 if attempt < self.cfg.retries:
                     delay = self.cfg.retry_delay * (2 ** (attempt - 1))
                     print(f"[VLM] 第 {attempt} 次请求失败: {exc}，{delay:.0f} 秒后重试...")
@@ -195,16 +253,19 @@ class VLMClient:
         used_choice = tool_choice
 
         last_exc: Exception | None = None
-        for attempt in range(1, self.cfg.retries + 1):
+        # 参数集中进 kw（0.4.13）：同 chat_with_image，可按服务端报错原地降级
+        kw = self._request_kwargs()
+        kw["max_tokens"] = self.cfg.max_output_tokens
+        kw["temperature"] = self.cfg.temperature
+        attempt = 0
+        while attempt < self.cfg.retries:
             try:
                 resp = self._client.chat.completions.create(
                     model=self.cfg.model,
                     messages=messages,
-                    max_tokens=self.cfg.max_output_tokens,
-                    temperature=self.cfg.temperature,
                     tools=tools,
                     tool_choice=used_choice,
-                    **self._request_kwargs(),
+                    **kw,
                 )
                 usage = getattr(resp, "usage", None)
                 if usage is not None and usage.prompt_tokens:
@@ -222,11 +283,14 @@ class VLMClient:
 
             except Exception as exc:
                 last_exc = exc
+                if self._degrade_kwargs(kw, exc):
+                    continue    # 参数已降级：立即重试，不计入重试次数
                 if used_choice == "required":
                     # provider 不支持 "required" → 降级 "auto" 立即重试（不等待退避）
                     used_choice = "auto"
                     print("[VLM] tool_choice='required' 不被当前 provider 支持，已降级 'auto' 重试")
                     continue
+                attempt += 1
                 if attempt < self.cfg.retries:
                     delay = self.cfg.retry_delay * (2 ** (attempt - 1))
                     print(f"[VLM] 第 {attempt} 次请求失败: {exc}，{delay:.0f} 秒后重试...")
