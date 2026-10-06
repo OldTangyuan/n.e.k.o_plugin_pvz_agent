@@ -14,7 +14,9 @@ _HERE = Path(__file__).resolve().parent
 for _candidate in (_HERE.parent, _HERE.parent.parent):
     _pvz_dir = _candidate / "pvz"
     if (_pvz_dir / "vendor" / "pvz_memory").is_dir():
-        for _p in (str(_pvz_dir), str(_pvz_dir / "vendor")):
+        for _p in (str(_candidate), str(_pvz_dir), str(_pvz_dir / "vendor")):
+            # _candidate = 插件根（service.py/neko_interface.py 所在）：
+            # tests/test_config_hot_apply.py 直接 `import service`
             if _p not in sys.path:
                 sys.path.insert(0, _p)
         break

@@ -1,0 +1,192 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "pvz_agent": {
+      "type": "object",
+      "title": "PVZ Agent",
+      "description": "让猫娘自己玩《植物大战僵尸》。此配置在插件未启动时也可编辑，插件启动时自动加载；插件运行中通过插件面板保存的改动会热应用。",
+      "properties": {
+        "api_base_url": {
+          "type": "string",
+          "title": "AI 决策服务地址",
+          "description": "OpenAI 兼容接口地址，如 https://api.example.com/v1。vision/text 两模式共用。",
+          "x-title-i18n": { "en": "AI decision API base URL", "zh-CN": "AI 决策服务地址" },
+          "x-description-i18n": { "en": "OpenAI-compatible base URL shared by vision/text modes.", "zh-CN": "OpenAI 兼容接口地址，vision/text 两模式共用。" }
+        },
+        "api_model": {
+          "type": "string",
+          "title": "AI 决策模型",
+          "description": "模型名，如 gpt-4o / deepseek-chat。",
+          "x-title-i18n": { "en": "AI decision model", "zh-CN": "AI 决策模型" }
+        },
+        "api_key": {
+          "type": "string",
+          "writeOnly": true,
+          "title": "AI 决策服务密钥",
+          "description": "服务密钥；已保存时留空 = 不修改。",
+          "x-title-i18n": { "en": "AI decision API key", "zh-CN": "AI 决策服务密钥" }
+        },
+        "text_api_base_url": {
+          "type": "string",
+          "title": "纯文本模式服务地址",
+          "description": "留空 = 复用上面的 AI 决策服务地址。",
+          "x-title-i18n": { "en": "Text-mode API base URL", "zh-CN": "纯文本模式服务地址" }
+        },
+        "text_api_model": {
+          "type": "string",
+          "title": "纯文本模式模型",
+          "description": "留空 = 复用上面的 AI 决策模型。",
+          "x-title-i18n": { "en": "Text-mode model", "zh-CN": "纯文本模式模型" }
+        },
+        "text_api_key": {
+          "type": "string",
+          "writeOnly": true,
+          "title": "纯文本模式密钥",
+          "description": "留空 = 复用上面的密钥；已保存时留空 = 不修改。",
+          "x-title-i18n": { "en": "Text-mode API key", "zh-CN": "纯文本模式密钥" }
+        },
+        "auto_start": {
+          "type": "boolean",
+          "title": "插件启动即自动开始游玩",
+          "description": "需游戏已打开且 AI 服务已配置。",
+          "default": false
+        },
+        "mode": {
+          "type": "string",
+          "title": "运行模式",
+          "description": "vision=OpenCV 视觉+VLM 看图决策；text=纯文本内存读状态+LLM 决策（需管理员权限）。",
+          "enum": ["vision", "text"],
+          "default": "vision",
+          "x-title-i18n": { "en": "Run mode", "zh-CN": "运行模式" }
+        },
+        "agent_controls_seed_selection": {
+          "type": "boolean",
+          "title": "选卡界面交给 Agent",
+          "description": "默认关：选卡场景由你手动选卡后进入战斗。",
+          "default": false
+        },
+        "tool_call_mode": {
+          "type": "string",
+          "title": "工具调用模式",
+          "description": "regex=简化正则提取 <tool_call>（默认）；fc=OpenAI 原生 function calling。",
+          "enum": ["regex", "fc"],
+          "default": "fc"
+        },
+        "planting_mode": {
+          "type": "string",
+          "title": "种植模式（text 模式）",
+          "description": "putplant=PutPlant 直接注入（默认，插件按游戏原生语义补齐 UI 行为）；mouseclick=注入 MouseClick 点卡片+格子，游戏自己处理扣费/冷却。",
+          "enum": ["putplant", "mouseclick"],
+          "default": "putplant"
+        },
+        "card_position_mode": {
+          "type": "string",
+          "title": "卡片定位方式",
+          "description": "opencv=实时识别（适配传送带/布局变化）；fixed=config.json 固定坐标（更稳定省资源）。",
+          "enum": ["opencv", "fixed"],
+          "default": "fixed"
+        },
+        "thinking": {
+          "type": "string",
+          "title": "思考预设（视觉模式）",
+          "description": "各家端点思考参数不兼容：真 OpenAI 用 openai_native*，DeepSeek/Kimi 用 disabled/enabled，qwen/silicon 用 openai*，Gemini 用 gemini*；选错也会自动降级兜底。空 = 服务端默认。",
+          "enum": ["", "disabled", "enabled", "openai", "openai_thinking", "openai_native", "openai_native_thinking", "openai_native_minimal", "openai_native_minimal_thinking", "claude", "claude_thinking", "gemini", "gemini_thinking", "gemini_3", "gemini_3_thinking", "openrouter", "openrouter_thinking"],
+          "default": ""
+        },
+        "text_thinking": {
+          "type": "string",
+          "title": "思考预设（纯文本模式）",
+          "description": "同上；text 模式想用不同思考档时单独设置。",
+          "enum": ["", "disabled", "enabled", "openai", "openai_thinking", "openai_native", "openai_native_thinking", "openai_native_minimal", "openai_native_minimal_thinking", "claude", "claude_thinking", "gemini", "gemini_thinking", "gemini_3", "gemini_3_thinking", "openrouter", "openrouter_thinking"],
+          "default": ""
+        },
+        "window_titles": {
+          "type": "array",
+          "title": "游戏窗口标题关键词",
+          "description": "模糊匹配：窗口标题包含任一关键词即命中；另按 PopCap 引擎窗口类兜底。",
+          "items": { "type": "string" },
+          "default": ["plant vs zombie", "植物大战僵尸", "pvz", "杂交版"]
+        },
+        "screenshot_feed_enabled": {
+          "type": "boolean",
+          "title": "被动截图推送（feed）",
+          "description": "周期把最新游戏纯截图推进主模型视野（不打断，只更新上下文）。",
+          "default": true
+        },
+        "screenshot_feed_interval": {
+          "type": "number",
+          "title": "feed 间隔（秒）",
+          "description": "画面没变化时不会重复推。",
+          "minimum": 2,
+          "maximum": 300,
+          "default": 8
+        },
+        "screenshot_nudge_enabled": {
+          "type": "boolean",
+          "title": "主动唤起（nudge）",
+          "description": "游玩中周期性推截图+短触发文本，唤起猫娘看画面并继续行动。",
+          "default": true
+        },
+        "screenshot_nudge_interval": {
+          "type": "number",
+          "title": "nudge 间隔（秒）",
+          "description": "太短会让猫娘频繁开口，太长则反应迟钝。",
+          "minimum": 2,
+          "maximum": 300,
+          "default": 5
+        },
+        "screenshot_nudge_text": {
+          "type": "string",
+          "title": "nudge 触发文本",
+          "description": "{MASTER_NAME} 会替换为对用户的称呼；设空则只推图（纯图不会让模型起回合）。"
+        },
+        "screenshot_max_edge_px": {
+          "type": "integer",
+          "title": "截图最长边像素",
+          "description": "0 = 原图不缩放。",
+          "minimum": 0,
+          "maximum": 4096,
+          "default": 0
+        },
+        "screenshot_jpeg_quality": {
+          "type": "integer",
+          "title": "推送 JPEG 质量",
+          "minimum": 1,
+          "maximum": 95,
+          "default": 95
+        },
+        "sun_auto_collect": {
+          "type": "boolean",
+          "title": "自动收集阳光",
+          "description": "后台用 OpenCV 自动收集阳光（猫娘无需操心）。",
+          "default": true
+        },
+        "scan_grid_enabled": {
+          "type": "boolean",
+          "title": "网格扫描",
+          "description": "植物/僵尸坐标辅助决策。",
+          "default": true
+        },
+        "scan_cards_enabled": {
+          "type": "boolean",
+          "title": "卡片扫描",
+          "description": "可用/不可用卡片辅助决策。",
+          "default": true
+        },
+        "notify_on_terminate": {
+          "type": "boolean",
+          "title": "关卡结束通报",
+          "description": "游戏内判定本关结束时推送通报。",
+          "default": true
+        },
+        "notify_window_lost": {
+          "type": "boolean",
+          "title": "窗口丢失通报",
+          "description": "游戏窗口丢失/不可用时推送通报并自动停止循环。",
+          "default": true
+        }
+      }
+    }
+  }
+}

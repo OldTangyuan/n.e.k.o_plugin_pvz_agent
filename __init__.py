@@ -198,7 +198,18 @@ class PVZAgentPlugin(NekoPluginBase):
         self._service.configure(self._cfg)
         preflight = self._service.probe()
         self.logger.info("[pvz_agent] 自检: %s", preflight)
+        # 配置热应用监视（0.4.16）：观察线程每秒看 profiles/default.toml 的
+        # mtime——宿主 GUI / 手编配置不会通知插件，靠轮询发现变更后重新合并
+        # + service.reconfigure()，全程不重启插件。
+        try:
+            self._service.set_config_watch(
+                Path(__file__).resolve().parent / "profiles" / "default.toml",
+                self._on_profile_changed,
+            )
+        except Exception as exc:
+            self.logger.warning("[pvz_agent] 配置热应用监视注册失败（忽略）: %s", exc)
         # 观察线程：周期把最新截图推给主模型（feed 纯截图 read + nudge 截图+触发 respond）
+        # ——兼做配置热应用的轮询时钟（1s tick）
         self._service.start_observer(self._on_observation)
         self._started = True
 
@@ -244,6 +255,19 @@ class PVZAgentPlugin(NekoPluginBase):
             return {"status": self._service.get_status()}
         except Exception:
             return {"status": {}}
+
+    def _on_profile_changed(self) -> None:
+        """profiles/default.toml 被外部修改（宿主 GUI / 手编）→ 重新合并并热应用。
+
+        由 service 观察线程（1s tick 的 mtime 监视）触发，运行在后台线程：
+        只做同步的文件读取与 service 调用，不碰任何 await 接口。
+        """
+        try:
+            self._cfg = merge_config_sources(self._read_own_plugin_config(), {})
+            result = self._service.reconfigure(self._cfg)
+            self.logger.info("[pvz_agent] profiles 变更已热应用: %s", result)
+        except Exception as exc:
+            self.logger.warning("[pvz_agent] profiles 变更热应用失败: %s", exc)
 
     def _build_config_payload(self) -> JsonObject:
         """构建配置载荷（pvz_config_get 用，静态配置面板经 action 拉取）。
@@ -801,8 +825,16 @@ class PVZAgentPlugin(NekoPluginBase):
                     "kept": kept,
                 }
             self._write_profile_section("pvz_agent", updates)
-            # 同步内存中的合并视图（pvz_config_get 立即反映；service 层重启后生效）
+            # 同步内存中的合并视图（pvz_config_get 立即反映）
             self._cfg = {**(self._cfg or {}), **updates}
+            # 热应用（0.4.16）：插件运行中即保存即生效——轻量项立即生效；
+            # AI 服务项（密钥/模型/地址/思考预设）重建 VLM 客户端（游玩中
+            # 热替换、决策历史保留）；仅运行模式切换等结构项下次开始游玩生效。
+            apply_result: JsonObject = {}
+            try:
+                apply_result = _as_mapping(self._service.reconfigure(self._cfg))
+            except Exception as exc:
+                apply_result = {"hot_applied": False, "error": str(exc)}
             secret_keys = [k for k in updates if k in _CONFIG_SECRET_KEYS]
             summary = f"已保存 {len(updates)} 项到 profiles/default.toml"
             if secret_keys:
@@ -811,10 +843,19 @@ class PVZAgentPlugin(NekoPluginBase):
                 summary += f"；保持原值: {', '.join(kept)}"
             if skipped:
                 summary += f"；跳过无效项: {', '.join(skipped)}"
+            apply_error = str(apply_result.get("error") or "")
+            deferred = apply_result.get("deferred") or []
+            if apply_error:
+                summary += f"；⚠ 热应用失败（旧配置继续运行，重启插件后生效）：{apply_error}"
+            elif deferred:
+                summary += f"；{apply_result.get('summary') or '部分项下次开始游玩时生效'}"
+            else:
+                summary += "；已热应用"
             # 打码摘要回给面板展示（明文不出插件）
             return {
                 "summary": summary,
-                "needs_restart": True,
+                "needs_restart": bool(apply_error) or bool(deferred),
+                "hot_apply": apply_result,
                 "saved": sorted(updates),
                 "key_masked": _mask_secret(str(self._cfg.get("api_key", "") or "").strip()),
                 "text_key_masked": _mask_secret(str(self._cfg.get("text_api_key", "") or "").strip()),

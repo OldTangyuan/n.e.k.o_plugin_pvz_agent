@@ -262,8 +262,9 @@ class PvZAgentService:
         self._logger = logger
         self._notifier = notifier
 
-        # 锁与事件（线程同步）
-        self._lock = threading.Lock()          # 保护共享状态字段
+        # 锁与事件（线程同步）。RLock（0.4.16）：reconfigure 持锁调用 configure
+        # （重入），热应用路径需要原子地"刷新配置 + 重建决策运行时"。
+        self._lock = threading.RLock()         # 保护共享状态字段
         self._stop_evt = threading.Event()     # set → 循环退出
         self._pause_evt = threading.Event()    # set → 暂停（只观察不执行）
         self._wake_evt = threading.Event()     # set → 提前唤醒 sleep（命令即时生效）
@@ -291,6 +292,9 @@ class PvZAgentService:
         self._tool_call_mode = "fc"              # "regex"=简化正则 / "fc"=原生函数调用
         self._planting_mode = "putplant"         # "putplant"=PutPlant 直注(默认) / "mouseclick"=注入点击
         self._api_cfg: dict[str, str] = {}       # AI 服务配置（plugin.toml api_*，configure 填充）
+        self._thinking = ""                      # 视觉模式思考预设（configure 填充；""=config.json 语义）
+        self._text_thinking = ""                 # 纯文本模式思考预设（同上）
+        self._runtime_mode: str | None = None    # 已构建决策运行时的模式（热应用/模式切换判定）
         self._window_titles: list[str] = list(DEFAULT_WINDOW_TITLES)
         self._window_poll_interval: float = 1.0   # 等待窗口时的轮询间隔（秒）
         self._memory_engine: Any = None           # text 模式的内存运行时（_ensure_memory 填充）
@@ -306,6 +310,12 @@ class PvZAgentService:
         self._feed_interval = 8.0
         self._nudge_enabled = True
         self._nudge_interval = 5.0
+        # 配置热应用（0.4.16）：观察线程每秒监视 profiles/default.toml 的
+        # mtime——宿主 GUI/手编配置不会通知插件，只能轮询。变更即回调 facade
+        # 重新合并 + reconfigure。
+        self._config_watch_path: Any = None
+        self._config_watch_mtime: float | None = None
+        self._on_config_change: Callable[[], None] | None = None
         # 给主模型的截图：原图优先（0 = 不缩放）+ 高质量 JPEG；超字节预算才降质。
         self._feed_max_edge = 0
         self._feed_quality = 95
@@ -395,6 +405,141 @@ class PvZAgentService:
                     "text_api_base_url", "text_api_model", "text_api_key",
                 )
             }
+            # 思考预设（0.4.16 修复：此前 thinking/text_thinking 只写 profiles、
+            # 从未进运行时——load_config 只认 config.json，面板设置形同虚设）。
+            # "" = 不覆盖（维持 config.json 的 thinking 值）。
+            self._thinking = str(plugin_cfg.get("thinking", "") or "").strip().lower()
+            self._text_thinking = str(plugin_cfg.get("text_thinking", "") or "").strip().lower()
+
+    def reconfigure(self, plugin_cfg: dict) -> dict[str, Any]:
+        """热应用配置（0.4.16）：不重启插件、不中断游玩。
+
+        - 轻量项（开关/间隔/窗口标题/种植模式/通知等）：``configure`` 立即生效
+          （游玩/观察循环每轮现读属性）；
+        - AI 服务项（密钥/模型/地址/思考预设）：重建 VLM 客户端并热替换——
+          游玩中 ``planner.vlm`` 单点换引用，**决策历史完整保留**，下一轮生效；
+        - Planner 结构（tool_call_mode 变更）：非游玩时才重建（system prompt
+          与解析器都变）；游玩中保留旧结构，下次开始游玩生效；
+        - 运行模式（vision↔text）：执行器结构不同。未游玩 → 丢弃运行时，
+          下次开始按新模式重建；游玩中 → 记为 deferred，``_ensure_runtime``
+          在下次 start 时自动 teardown 重建。
+        - 任何重建失败都保留旧运行时（返回 error，不抛出——保存配置本身已成功）。
+
+        调用方需已把 ``plugin_cfg`` 合并好（含 profiles 覆盖）。返回热应用报告。
+        """
+        with self._lock:
+            old_mode = self._mode
+            old_tcm = self._tool_call_mode
+            old_phase = self._phase
+            self.configure(plugin_cfg)  # RLock 可重入
+            if self._planner is None:
+                return {
+                    "hot_applied": True, "runtime": "pending",
+                    "summary": "决策运行时未构建——开始游玩时将按新配置构建",
+                }
+            if self._mode != old_mode:
+                if old_phase == self.PHASE_RUNNING:
+                    return {
+                        "hot_applied": True, "runtime": "deferred", "deferred": ["mode"],
+                        "summary": "运行模式变更需重建执行器——正在游玩，下次开始游玩时切换；其余改动已生效",
+                    }
+                self._teardown_runtime()
+                return {
+                    "hot_applied": True, "runtime": "torn_down",
+                    "summary": "运行模式已变更——下次开始游玩时按新模式重建执行器",
+                }
+            # 模式未变：重建 VLM 客户端（密钥/模型/思考预设在这里生效）
+            core = self._import_core()
+            try:
+                cfg = core.config.load_config(self._api_cfg)
+                self._apply_plugin_overrides(cfg)
+            except Exception as exc:
+                return {
+                    "hot_applied": True, "runtime": "kept",
+                    "error": f"加载新配置失败，保留旧运行时：{exc}",
+                }
+            self._cfg = cfg
+            try:
+                if self._mode == "text":
+                    new_vlm = core.vlm.VLMClient(cfg.text_vlm)
+                else:
+                    new_vlm = core.vlm.VLMClient(cfg.vlm)
+            except Exception as exc:
+                return {
+                    "hot_applied": True, "runtime": "kept",
+                    "error": f"VLM 客户端重建失败，保留旧运行时：{exc}",
+                }
+            self._vlm = new_vlm
+            try:
+                if self._planner is not None:
+                    self._planner.vlm = new_vlm  # 游玩中热替换，历史保留
+            except Exception:
+                pass
+            detail = "VLM 客户端已热替换（当前这轮用旧配置跑完，下一轮生效）"
+            if old_phase != self.PHASE_RUNNING and self._tool_call_mode != old_tcm:
+                # 非游玩才动 Planner 结构（system prompt/解析器都变）
+                try:
+                    if self._mode == "text":
+                        self._build_text_decision(core, cfg)
+                    else:
+                        self._build_vision_decision(core, cfg)
+                    detail += "；Planner 已按新 tool_call_mode 重建"
+                except Exception as exc:
+                    detail += f"；Planner 重建失败（保留旧结构）：{exc}"
+            self._note_config_file_seen()
+            return {"hot_applied": True, "runtime": "rebuilt", "summary": detail}
+
+    def _teardown_runtime(self) -> None:
+        """丢弃已构建的决策运行时（调用方持锁）：_ensure_runtime 下次重建。
+
+        只丢决策层（planner/vlm/cfg）——窗口/执行器/观察线程不动，模式切换
+        后由 _ensure_runtime 走完整构建（执行器随新模式重建）。
+        """
+        self._planner = None
+        self._vlm = None
+        self._cfg = None
+        self._runtime_mode = None
+
+    def set_config_watch(self, path: Any, on_change: Callable[[], None]) -> None:
+        """让观察线程每秒监视配置覆盖文件的 mtime，变更即回调 ``on_change``。
+
+        覆盖宿主 GUI 与插件面板两条保存通道——宿主改配置不会通知插件，
+        只能轮询。首个 tick 只建立基线不触发。
+        """
+        with self._lock:
+            self._config_watch_path = path
+            self._on_config_change = on_change
+            self._config_watch_mtime = None
+
+    def _note_config_file_seen(self) -> None:
+        """把监视基线刷成当前 mtime（自己刚写完文件/刚热应用后防重复触发）。"""
+        path = self._config_watch_path
+        if path is None:
+            return
+        try:
+            with self._lock:
+                self._config_watch_mtime = Path(path).stat().st_mtime
+        except OSError:
+            pass
+
+    def _check_config_watch(self) -> None:
+        """观察线程 tick 首步：配置覆盖文件变更 → 回调 facade 重新合并热应用。"""
+        path = self._config_watch_path
+        callback = self._on_config_change
+        if path is None or callback is None:
+            return
+        try:
+            mtime = Path(path).stat().st_mtime
+        except OSError:
+            return
+        with self._lock:
+            baseline = self._config_watch_mtime
+            self._config_watch_mtime = mtime
+        if baseline is not None and mtime != baseline:
+            try:
+                callback()
+            except Exception as exc:
+                self._logger.warning("[pvz-agent] 配置热应用回调失败: %s", exc)
 
     # ------------------------------------------------------------------ #
     #  懒加载：窗口（无需 VLM）与完整运行时（需要 VLM 密钥）
@@ -585,7 +730,14 @@ class PvZAgentService:
         ``window_timeout``/``window_cancel`` 透传给窗口轮询（见 ``_ensure_window``）。
         """
         if self._planner is not None:
-            return self._cfg
+            # 模式切换（deferred）后到站：旧运行时是旧模式建的，丢弃重建
+            with self._lock:
+                if self._runtime_mode is not None and self._runtime_mode != self._mode:
+                    self._teardown_runtime()
+            if self._planner is None:
+                pass  # 已 teardown → 走完整构建
+            else:
+                return self._cfg
         win = self._ensure_window(timeout=window_timeout, cancel=window_cancel)
         core = self._import_core()
         try:
@@ -597,15 +749,8 @@ class PvZAgentService:
                 "api_model / api_key（保存写入 profiles/default.toml），或直接填 "
                 "plugin.toml [pvz_agent]。"
             )
-        # 应用插件级开关（覆盖 pvz/config.json 的对应项）
-        cfg.sun.enabled = bool(cfg.sun.enabled) and self._sun_auto_collect
-        cfg.grid_scan.enabled = bool(cfg.grid_scan.enabled) and self._scan_grid_enabled
-        cfg.card_scan.enabled = bool(cfg.card_scan.enabled) and self._scan_cards_enabled
-        # 插件级 tool_call_mode 覆盖 config.json（默认 regex=简化正则）
-        cfg.tool_call_mode = self._tool_call_mode
-        # 插件级 mode 覆盖 config.json：插件 runtime 的模式以 plugin.toml 为准，
-        # 否则 cfg.mode 与真实运行模式不一致（核心内按 cfg.mode 选 VLM 配置）。
-        cfg.mode = self._mode
+        # 应用插件级开关/模式/思考预设（覆盖 config.json 对应项）
+        self._apply_plugin_overrides(cfg)
         self._cfg = cfg
 
         # 纯文本模式：读内存获取状态 + 注入执行，不用 OpenCV/视觉模型。
@@ -645,6 +790,24 @@ class PvZAgentService:
                 self._select_scanner = select_scan.SelectScanner(cfg.layout, cfg.select_scan)
                 self._executor.attach_select_scanner(self._select_scanner)
 
+        self._build_vision_decision(core, cfg)
+        return cfg
+
+    def _ensure_runtime_text(self, core: Any, cfg: Any) -> Any:
+        """纯文本模式运行时：内存引擎（读状态 + 注入执行）+ 文本 LLM 决策。
+
+        不构建 OpenCV 扫描器 / 阳光线程 / pyautogui 执行器；``self._executor``
+        直接指向 ``MemoryGameEngine``（接口与 ``Executor`` 对齐）。
+        """
+        engine = self._ensure_memory()  # 内存引擎（_ensure_memory 幂等，同时写 self._memory_engine）
+        engine.set_seed_selection_enabled(self._agent_selects_seeds)  # 选卡是否交给 AgentB
+        self._executor = engine  # 内存引擎即执行器（接口与 Executor 对齐）
+        engine.start_force_run()   # 失焦不暂停：看门狗清 game_paused
+        self._build_text_decision(core, cfg)
+        return cfg
+
+    def _build_vision_decision(self, core: Any, cfg: Any) -> None:
+        """构建视觉模式决策组件：VLM 客户端 + Planner（_ensure_runtime / 热应用共用）。"""
         self._vlm = core.vlm.VLMClient(cfg.vlm)
         self._img_fmt = cfg.agent.image_format
         self._img_mime = "image/png" if cfg.agent.image_format == "png" else "image/jpeg"
@@ -659,18 +822,10 @@ class PvZAgentService:
             tool_call_mode=cfg.tool_call_mode,
         )
         self._last_turn_time = time.perf_counter()
-        return cfg
+        self._runtime_mode = "vision"
 
-    def _ensure_runtime_text(self, core: Any, cfg: Any) -> Any:
-        """纯文本模式运行时：内存引擎（读状态 + 注入执行）+ 文本 LLM 决策。
-
-        不构建 OpenCV 扫描器 / 阳光线程 / pyautogui 执行器；``self._executor``
-        直接指向 ``MemoryGameEngine``（接口与 ``Executor`` 对齐）。
-        """
-        engine = self._ensure_memory()  # 内存引擎（_ensure_memory 幂等，同时写 self._memory_engine）
-        engine.set_seed_selection_enabled(self._agent_selects_seeds)  # 选卡是否交给 AgentB
-        self._executor = engine  # 内存引擎即执行器（接口与 Executor 对齐）
-        engine.start_force_run()   # 失焦不暂停：看门狗清 game_paused
+    def _build_text_decision(self, core: Any, cfg: Any) -> None:
+        """构建纯文本模式决策组件：VLM 客户端 + Planner（不含引擎/执行器）。"""
         self._vlm = core.vlm.VLMClient(cfg.text_vlm)  # 纯文本模式用独立模型配置（可不同模型+思考模式）
         self._img_fmt = cfg.agent.image_format
         self._img_mime = "image/png" if cfg.agent.image_format == "png" else "image/jpeg"
@@ -691,7 +846,24 @@ class PvZAgentService:
             tool_call_mode=cfg.tool_call_mode,
         )
         self._last_turn_time = time.perf_counter()
-        return cfg
+        self._runtime_mode = "text"
+
+    def _apply_plugin_overrides(self, cfg: Any) -> None:
+        """把插件级开关/模式/思考预设覆盖到 AppConfig（构建与热应用共用）。
+
+        插件 runtime 的模式以插件配置为准，否则 cfg.mode 与真实运行模式
+        不一致（核心内按 cfg.mode 选 VLM 配置）。思考预设 "" = 不覆盖
+        （维持 config.json 的 thinking 值）。
+        """
+        cfg.sun.enabled = bool(cfg.sun.enabled) and self._sun_auto_collect
+        cfg.grid_scan.enabled = bool(cfg.grid_scan.enabled) and self._scan_grid_enabled
+        cfg.card_scan.enabled = bool(cfg.card_scan.enabled) and self._scan_cards_enabled
+        cfg.tool_call_mode = self._tool_call_mode
+        cfg.mode = self._mode
+        if self._thinking:
+            cfg.vlm.thinking = self._thinking
+        if self._text_thinking:
+            cfg.text_vlm.thinking = self._text_thinking
 
     def _ensure_memory(self) -> Any:
         """连接内存引擎（幂等）；失败抛 RuntimeError（携带指引）。"""
@@ -1126,6 +1298,10 @@ class PvZAgentService:
 
     def _observer_tick(self) -> None:
         """一次观察决策：feed（纯截图 read）+ nudge（截图+触发 respond）。可单测直调。"""
+        try:
+            self._check_config_watch()
+        except Exception as exc:
+            self._logger.warning("[pvz-agent] 配置监视异常: %s", exc)
         now = time.time()
         # 被动 feed：每 feed_interval 推一帧纯截图（画面没变不推）
         if self._feed_enabled:

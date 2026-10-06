@@ -64,7 +64,7 @@
 </head>
 <body>
   <h1>PVZ 配置面板</h1>
-  <p class="sub">覆盖 plugin.toml [pvz_agent] 的全部配置项；保存写入 profiles/default.toml（与宿主 GUI 配置界面同一文件），重启插件生效。</p>
+  <p class="sub">覆盖 plugin.toml [pvz_agent] 的全部配置项；保存写入 profiles/default.toml（与宿主 GUI 配置界面同一文件）。插件运行中保存即热应用：密钥/模型/思考预设/开关立即生效（游玩不中断），仅运行模式切换等结构项下次开始游玩时生效；未运行则下次启动生效。</p>
   <p class="diag" id="diag">面板 v8-static · 初始化中…</p>
   <div id="alertBox"></div>
 
@@ -298,7 +298,7 @@ async function saveConfig() {
     const data = await callAction("pvz_config_set", payload);
     const saved = Array.isArray(data.saved) ? data.saved : [];
     const keyNote = saved.includes("api_key") ? `（密钥已更新：${data.key_masked || "已打码"}）` : "";
-    setAlert(String(data.summary || "已保存") + keyNote + (data.needs_restart ? " —— 重启插件后生效（插件列表里停止再启动）" : ""), "ok");
+    setAlert(String(data.summary || "已保存") + keyNote + (data.needs_restart ? " —— 部分结构项将在下次开始游玩时生效" : " —— 已热应用"), "ok");
     if (saved.includes("api_key") || saved.includes("text_api_key")) loadConfig();
   } catch (exc) {
     setAlert(`保存失败：${exc && exc.message || exc}`, "err");
